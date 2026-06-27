@@ -17,3 +17,5 @@
 # Editor / tooling
 /.claude/
 .DS_Store
+
+.claude/memory/
