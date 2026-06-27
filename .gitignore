@@ -1,0 +1,19 @@
+# Downloaded binaries (fetched from GitHub releases by the script)
+/cli-proxy-api
+/cpa-usage-keeper
+
+# Version markers written by the script
+/.cliproxyapi-version
+/.cpa-usage-keeper-version
+
+# Generated config (contains your management secret-key hash)
+/config.yaml
+
+# Runtime data, secrets, and logs
+/keeper-data/
+/logs/
+/static/
+
+# Editor / tooling
+/.claude/
+.DS_Store
