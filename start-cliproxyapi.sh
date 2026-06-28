@@ -128,27 +128,44 @@ gh_curl() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Purge any Homebrew-installed cliproxyapi
+# 5. Purge any Homebrew-installed cliproxyapi and cpa-usage-keeper
 # ---------------------------------------------------------------------------
 purge_homebrew() {
   if ! command -v brew >/dev/null 2>&1; then
     return 0
   fi
-  if ! brew list --formula 2>/dev/null | grep -qx cliproxyapi; then
-    log "No Homebrew cliproxyapi found — nothing to purge."
-    return 0
+
+  local found=false
+
+  if brew list --formula 2>/dev/null | grep -qx cliproxyapi; then
+    found=true
+    log "Found Homebrew cliproxyapi — stopping and uninstalling it."
+    brew services stop cliproxyapi >/dev/null 2>&1 || true
+    local brew_plist="${LAUNCH_AGENTS_DIR}/homebrew.mxcl.cliproxyapi.plist"
+    if [[ -f "${brew_plist}" ]]; then
+      launchctl bootout "gui/$(id -u)/homebrew.mxcl.cliproxyapi" >/dev/null 2>&1 || true
+      launchctl unload "${brew_plist}" >/dev/null 2>&1 || true
+      rm -f "${brew_plist}"
+    fi
+    brew uninstall --force cliproxyapi >/dev/null 2>&1 || warn "brew uninstall cliproxyapi reported an issue (continuing)."
+    log "Homebrew cliproxyapi removed."
   fi
-  log "Found Homebrew cliproxyapi — stopping and uninstalling it."
-  brew services stop cliproxyapi >/dev/null 2>&1 || true
-  # Remove the brew-managed launch agent if it lingers.
-  local brew_plist="${LAUNCH_AGENTS_DIR}/homebrew.mxcl.cliproxyapi.plist"
-  if [[ -f "${brew_plist}" ]]; then
-    launchctl bootout "gui/$(id -u)/homebrew.mxcl.cliproxyapi" >/dev/null 2>&1 || true
-    launchctl unload "${brew_plist}" >/dev/null 2>&1 || true
-    rm -f "${brew_plist}"
+
+  if brew list --formula 2>/dev/null | grep -qx cpa-usage-keeper; then
+    found=true
+    log "Found Homebrew cpa-usage-keeper — stopping and uninstalling it."
+    brew services stop cpa-usage-keeper >/dev/null 2>&1 || true
+    local keeper_brew_plist="${LAUNCH_AGENTS_DIR}/homebrew.mxcl.cpa-usage-keeper.plist"
+    if [[ -f "${keeper_brew_plist}" ]]; then
+      launchctl bootout "gui/$(id -u)/homebrew.mxcl.cpa-usage-keeper" >/dev/null 2>&1 || true
+      launchctl unload "${keeper_brew_plist}" >/dev/null 2>&1 || true
+      rm -f "${keeper_brew_plist}"
+    fi
+    brew uninstall --force cpa-usage-keeper >/dev/null 2>&1 || warn "brew uninstall cpa-usage-keeper reported an issue (continuing)."
+    log "Homebrew cpa-usage-keeper removed."
   fi
-  brew uninstall --force cliproxyapi >/dev/null 2>&1 || warn "brew uninstall reported an issue (continuing)."
-  log "Homebrew cliproxyapi removed."
+
+  "${found}" || log "No Homebrew cliproxyapi / cpa-usage-keeper found — nothing to purge."
 }
 
 # ---------------------------------------------------------------------------
@@ -622,8 +639,24 @@ stop_service() {
 
 restart_service() {
   log "Restarting service ..."
+  # Stop keeper first to prevent its management-API polling from triggering an
+  # IP ban on the freshly-started CPA before we (or the user) can log in.
+  local keeper_was_running=false
+  if launchctl print "gui/$(id -u)/${KEEPER_RUN_LABEL}" >/dev/null 2>&1 \
+     || pgrep -x "${KEEPER_BIN_NAME}" >/dev/null 2>&1; then
+    keeper_was_running=true
+    log "Stopping cpa-usage-keeper before restart to avoid management-API ban ..."
+    stop_keeper
+    # Kill any stray process not tracked by launchctl.
+    pkill -x "${KEEPER_BIN_NAME}" 2>/dev/null || true
+    sleep 1
+  fi
   stop_service
   start_service
+  if "${keeper_was_running}"; then
+    log "Restarting cpa-usage-keeper ..."
+    start_keeper
+  fi
 }
 
 start_keeper() {
