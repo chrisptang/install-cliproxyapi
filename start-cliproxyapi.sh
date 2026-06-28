@@ -38,7 +38,9 @@
 #
 # All GitHub fetches (api.github.com queries + github.com release downloads, for both
 # CLIProxyAPI and cpa-usage-keeper) go through an HTTP proxy: $http_proxy / $HTTP_PROXY
-# if set, otherwise http://127.0.0.1:7890.
+# if set, otherwise http://127.0.0.1:7890. The proxy is captured early and then ALL
+# proxy env-vars (http_proxy, HTTPS_PROXY, ALL_PROXY, …) are unset so that the services
+# we start (cli-proxy-api, cpa-usage-keeper) never inherit a proxy from this shell.
 
 set -euo pipefail
 
@@ -60,6 +62,11 @@ ASSET_SUFFIX="darwin_aarch64.tar.gz"   # macOS Apple Silicon asset
 # Proxy used only for GitHub fetches (api.github.com / github.com release downloads).
 # Honor an existing http_proxy/HTTP_PROXY from the environment, else fall back to 7890.
 GITHUB_PROXY="${http_proxy:-${HTTP_PROXY:-http://127.0.0.1:7890}}"
+
+# Strip all proxy env-vars from this shell session NOW so that any service we
+# start (cli-proxy-api, cpa-usage-keeper, launchctl, brew …) does NOT inherit
+# them. GITHUB_PROXY above has already captured the value we need for gh_curl.
+unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
 LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
 RUN_LABEL="me.router-for.cliproxyapi"
@@ -284,7 +291,7 @@ api-keys:
   - local-key
 # Management API (control panel / remote management).
 remote-management:
-  allow-remote: false
+  allow-remote: true
   secret-key: "local-key"
 debug: true
 # --------------------------------------------------------------------------
