@@ -1,19 +1,24 @@
 # install-cliproxyapi
 
-A single-file macOS (Apple Silicon) manager that installs, auto-updates, and keeps running:
+Cross-platform installer and manager for:
 
-- **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — the local proxy/router for Codex/Claude/Gemini.
-- **[cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper)** — a token-usage dashboard that reads usage from CLIProxyAPI.
+- **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — the local proxy/router for Codex, Claude, and Gemini.
+- **[cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper)** — a token-usage dashboard backed by CLIProxyAPI.
 
-Both run as user **LaunchAgents**: they start on login, restart on crash (KeepAlive), and check GitHub for a newer release every day at 10:00.
+Both applications start automatically after login, restart after a crash, and check GitHub for updates every day at 10:00.
 
-## Requirements
+## Supported systems
 
-- macOS on Apple Silicon (downloads the `darwin_aarch64` / `darwin_arm64` builds).
-- `curl` and `tar` (preinstalled on macOS).
-- An HTTP proxy reachable for GitHub fetches (see [Proxy](#proxy)).
+| System | Architectures | Background-process mechanism |
+| --- | --- | --- |
+| macOS | Apple Silicon | User LaunchAgents |
+| Windows 10/11 | x64, ARM64 | Current-user Scheduled Tasks |
+
+Windows tasks use the current user's limited token, so a standard Windows installation does not require administrator privileges. Windows PowerShell 5.1 or PowerShell 7 is supported; organization-managed devices may still restrict Scheduled Task creation through policy.
 
 ## Quick start
+
+### macOS
 
 ```bash
 git clone ssh://git@github.com/chrisptang/install-cliproxyapi.git
@@ -21,76 +26,95 @@ cd install-cliproxyapi
 ./start-cliproxyapi.sh install
 ```
 
-`install` (the default with no argument) does everything:
+### Windows
 
-1. Removes any Homebrew-installed `cliproxyapi` (those lag behind upstream).
-2. Creates `config.yaml` if missing (API key `local-key`, management secret key `local-key`).
-3. Sets `usage-statistics-enabled: true` in `config.yaml` — **required** for the dashboard to receive data.
-4. Downloads the latest CLIProxyAPI binary and starts it (default port **8317**).
-5. Installs the cpa-usage-keeper dashboard, writes its `.env` pointing at the local proxy, and starts it on port **30000**.
-6. Installs daily-updater LaunchAgents (10:00) for both.
+Run in PowerShell:
 
-When it finishes:
+```powershell
+git clone ssh://git@github.com/chrisptang/install-cliproxyapi.git
+cd install-cliproxyapi
+powershell -ExecutionPolicy Bypass -File .\start-cliproxyapi.ps1 install
+```
+
+If script execution is already allowed, this shorter form also works:
+
+```powershell
+.\start-cliproxyapi.ps1 install
+```
+
+After installation:
 
 - Proxy: `http://127.0.0.1:8317`
-- Dashboard: **http://127.0.0.1:30000**
+- Dashboard: `http://127.0.0.1:30000`
+- Default client API key: `local-key`
+- Default management key: `local-key`
+
+Change the default keys before exposing either service outside your computer.
 
 ## Commands
 
-### CLIProxyAPI
+The macOS and Windows scripts expose the same commands. Substitute the command prefix for your system:
+
+- macOS: `./start-cliproxyapi.sh`
+- Windows: `.\start-cliproxyapi.ps1`
 
 | Command | What it does |
 | --- | --- |
-| `./start-cliproxyapi.sh install` | Full setup (default if no argument). |
-| `./start-cliproxyapi.sh update` | Download a newer release if any, then restart. |
-| `./start-cliproxyapi.sh start` | Start the service. |
-| `./start-cliproxyapi.sh stop` | Stop the service. |
-| `./start-cliproxyapi.sh restart` | Restart the service. |
-| `./start-cliproxyapi.sh status` | Show service + version status for both. |
-| `./start-cliproxyapi.sh uninstall` | Remove all LaunchAgents (keeps downloaded files). |
+| `install` | Install/update both applications, register background jobs, and start them. This is the default. |
+| `update` | Check for a CLIProxyAPI update and restart it if updated. |
+| `start` | Start CLIProxyAPI. |
+| `stop` | Stop CLIProxyAPI. |
+| `restart` | Restart CLIProxyAPI. |
+| `status` | Show service, binary, and version status for both applications. |
+| `uninstall` | Stop and remove background jobs while keeping config, binaries, and usage data. |
+| `keeper-install` | Install/update and start cpa-usage-keeper. |
+| `keeper-update` | Check for a cpa-usage-keeper update and restart it if updated. |
+| `keeper-start` | Start cpa-usage-keeper. |
+| `keeper-stop` | Stop cpa-usage-keeper. |
+| `keeper-restart` | Restart cpa-usage-keeper. |
 
-### cpa-usage-keeper dashboard (port 30000)
+## GitHub proxy
 
-| Command | What it does |
-| --- | --- |
-| `./start-cliproxyapi.sh keeper-install` | Download dashboard, write `.env`, install agents, start. |
-| `./start-cliproxyapi.sh keeper-update` | Download a newer dashboard if any, then restart. |
-| `./start-cliproxyapi.sh keeper-start` | Start the dashboard. |
-| `./start-cliproxyapi.sh keeper-stop` | Stop the dashboard. |
-| `./start-cliproxyapi.sh keeper-restart` | Restart the dashboard. |
+Release API requests and downloads use `$http_proxy`, then `$HTTP_PROXY`, and finally `http://127.0.0.1:7890` by default.
 
-## Proxy
-
-All GitHub fetches — `api.github.com` release queries and `github.com` release downloads, for both projects — go through an HTTP proxy:
-
-- `$http_proxy` if set, else `$HTTP_PROXY` if set, else the default `http://127.0.0.1:7890`.
-
-Override per-run, for example:
+macOS example:
 
 ```bash
 http_proxy=http://127.0.0.1:1087 ./start-cliproxyapi.sh update
 ```
 
-## Layout & generated files
+Windows examples:
 
-The script downloads binaries and generates runtime files into this directory. They are **git-ignored** and never committed:
+```powershell
+# Use a proxy. The Windows manager persists this value for daily updates.
+.\start-cliproxyapi.ps1 install -GitHubProxy http://127.0.0.1:1087
 
-| Path | Purpose |
-| --- | --- |
-| `cli-proxy-api` | CLIProxyAPI binary (downloaded). |
-| `cpa-usage-keeper` | Dashboard binary (downloaded). |
-| `config.yaml` | CLIProxyAPI config (contains your management secret-key hash). |
-| `keeper-data/` | Dashboard SQLite DB, logs, backups, and `.env` (contains `CPA_MANAGEMENT_KEY`). |
-| `logs/` | LaunchAgent stdout/stderr logs. |
-| `.cliproxyapi-version`, `.cpa-usage-keeper-version` | Installed-version markers. |
+# Connect directly without a proxy.
+.\start-cliproxyapi.ps1 install -GitHubProxy ""
+```
 
-LaunchAgents are written to `~/Library/LaunchAgents/`:
+The proxy is used only for GitHub fetches; the managed applications do not inherit it from the installer.
 
-- `me.router-for.cliproxyapi[.update].plist`
-- `me.willxup.cpa-usage-keeper[.update].plist`
+## Generated files
+
+### macOS
+
+Runtime files are stored in `~/.local/share/cliproxyapi`. LaunchAgents are written to `~/Library/LaunchAgents`.
+
+### Windows
+
+Runtime files are stored in `%LOCALAPPDATA%\CLIProxyAPI`. The manager creates four current-user Scheduled Tasks:
+
+- `CLIProxyAPI Proxy`
+- `CLIProxyAPI Proxy Update`
+- `CLIProxyAPI Usage Keeper`
+- `CLIProxyAPI Usage Keeper Update`
+
+The data directory contains downloaded executables, `config.yaml`, the dashboard `.env` and SQLite data, logs, version markers, a persisted GitHub proxy setting, and a copy of the Windows manager used by daily update tasks.
 
 ## Notes
 
-- `config.yaml` and `keeper-data/.env` hold secrets and are intentionally excluded from version control via `.gitignore`. Back them up yourself if needed.
-- The dashboard only shows data while `usage-statistics-enabled: true` is set in `config.yaml`; `install` sets this for you.
-- To fully remove: `./start-cliproxyapi.sh uninstall`, then delete the downloaded binaries and `keeper-data/` if you want them gone too.
+- `config.yaml` and `keeper-data/.env` contain secrets. Back them up securely.
+- The dashboard requires `usage-statistics-enabled: true`; both installers enable it automatically.
+- `uninstall` intentionally preserves local data. Delete the platform data directory manually if you want a complete removal.
+- On Windows, background tasks run only while the installing user is logged in. This keeps installation administrator-free and matches the macOS user-agent model.

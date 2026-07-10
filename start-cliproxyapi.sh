@@ -48,12 +48,15 @@ set -euo pipefail
 # Paths & constants
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Data directory outside ~/Documents so macOS TCC does not block LaunchAgent
+# processes from reading the working directory and config file.
+DATA_DIR="${HOME}/.local/share/cliproxyapi"
 BIN_NAME="cli-proxy-api"
-BIN_PATH="${REPO_DIR}/${BIN_NAME}"
-CONFIG_PATH="${REPO_DIR}/config.yaml"
-VERSION_FILE="${REPO_DIR}/.cliproxyapi-version"
+BIN_PATH="${DATA_DIR}/${BIN_NAME}"
+CONFIG_PATH="${DATA_DIR}/config.yaml"
+VERSION_FILE="${DATA_DIR}/.cliproxyapi-version"
 AUTH_DIR="${HOME}/.cli-proxy-api/"
-LOG_DIR="${REPO_DIR}/logs"
+LOG_DIR="${DATA_DIR}/logs"
 
 GITHUB_REPO="router-for-me/CLIProxyAPI"
 LATEST_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
@@ -81,12 +84,12 @@ UPDATE_MINUTE=0
 # cpa-usage-keeper (token-usage dashboard) — same release/agent approach
 # ---------------------------------------------------------------------------
 KEEPER_BIN_NAME="cpa-usage-keeper"
-KEEPER_BIN_PATH="${REPO_DIR}/${KEEPER_BIN_NAME}"
-KEEPER_DATA_DIR="${REPO_DIR}/keeper-data"
+KEEPER_BIN_PATH="${DATA_DIR}/${KEEPER_BIN_NAME}"
+KEEPER_DATA_DIR="${DATA_DIR}/keeper-data"
 # The keeper loads ".env" from its working directory; keep it inside the data dir so
 # we run the binary from there and never touch any other .env in the repo.
 KEEPER_ENV_PATH="${KEEPER_DATA_DIR}/.env"
-KEEPER_VERSION_FILE="${REPO_DIR}/.cpa-usage-keeper-version"
+KEEPER_VERSION_FILE="${DATA_DIR}/.cpa-usage-keeper-version"
 
 KEEPER_GITHUB_REPO="Willxup/cpa-usage-keeper"
 KEEPER_LATEST_API="https://api.github.com/repos/${KEEPER_GITHUB_REPO}/releases/latest"
@@ -125,6 +128,70 @@ gh_curl() {
   else
     curl "$@"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Migrate existing files from the repo dir into DATA_DIR (one-time, idempotent).
+# Called at the top of cmd_install so subsequent runs are no-ops.
+# ---------------------------------------------------------------------------
+migrate_from_repo() {
+  local moved=false
+
+  # binary
+  if [[ -f "${REPO_DIR}/${BIN_NAME}" && ! -f "${DATA_DIR}/${BIN_NAME}" ]]; then
+    mkdir -p "${DATA_DIR}"
+    mv "${REPO_DIR}/${BIN_NAME}" "${DATA_DIR}/${BIN_NAME}"
+    log "Migrated ${BIN_NAME} → ${DATA_DIR}/"
+    moved=true
+  fi
+
+  # config
+  if [[ -f "${REPO_DIR}/config.yaml" && ! -f "${DATA_DIR}/config.yaml" ]]; then
+    mkdir -p "${DATA_DIR}"
+    cp "${REPO_DIR}/config.yaml" "${DATA_DIR}/config.yaml"
+    log "Migrated config.yaml → ${DATA_DIR}/"
+    moved=true
+  fi
+
+  # version file
+  if [[ -f "${REPO_DIR}/.cliproxyapi-version" && ! -f "${DATA_DIR}/.cliproxyapi-version" ]]; then
+    mkdir -p "${DATA_DIR}"
+    mv "${REPO_DIR}/.cliproxyapi-version" "${DATA_DIR}/.cliproxyapi-version"
+    moved=true
+  fi
+
+  # logs
+  if [[ -d "${REPO_DIR}/logs" && ! -d "${DATA_DIR}/logs" ]]; then
+    mkdir -p "${DATA_DIR}"
+    mv "${REPO_DIR}/logs" "${DATA_DIR}/logs"
+    log "Migrated logs/ → ${DATA_DIR}/logs/"
+    moved=true
+  fi
+
+  # keeper binary
+  if [[ -f "${REPO_DIR}/${KEEPER_BIN_NAME}" && ! -f "${DATA_DIR}/${KEEPER_BIN_NAME}" ]]; then
+    mkdir -p "${DATA_DIR}"
+    mv "${REPO_DIR}/${KEEPER_BIN_NAME}" "${DATA_DIR}/${KEEPER_BIN_NAME}"
+    log "Migrated ${KEEPER_BIN_NAME} → ${DATA_DIR}/"
+    moved=true
+  fi
+
+  # keeper version file
+  if [[ -f "${REPO_DIR}/.cpa-usage-keeper-version" && ! -f "${DATA_DIR}/.cpa-usage-keeper-version" ]]; then
+    mkdir -p "${DATA_DIR}"
+    mv "${REPO_DIR}/.cpa-usage-keeper-version" "${DATA_DIR}/.cpa-usage-keeper-version"
+    moved=true
+  fi
+
+  # keeper-data (SQLite DB + .env)
+  if [[ -d "${REPO_DIR}/keeper-data" && ! -d "${DATA_DIR}/keeper-data" ]]; then
+    mkdir -p "${DATA_DIR}"
+    mv "${REPO_DIR}/keeper-data" "${DATA_DIR}/keeper-data"
+    log "Migrated keeper-data/ → ${DATA_DIR}/keeper-data/"
+    moved=true
+  fi
+
+  "${moved}" || true
 }
 
 # ---------------------------------------------------------------------------
@@ -488,7 +555,7 @@ write_run_plist() {
         <string>${CONFIG_PATH}</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${REPO_DIR}</string>
+    <string>${DATA_DIR}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -519,7 +586,7 @@ write_update_plist() {
         <string>update</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${REPO_DIR}</string>
+    <string>${DATA_DIR}</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -582,7 +649,7 @@ write_keeper_update_plist() {
         <string>keeper-update</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${REPO_DIR}</string>
+    <string>${DATA_DIR}</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -751,6 +818,7 @@ cmd_install() {
   require tar
   log "=== Installing CLIProxyAPI manager (repo: ${REPO_DIR}) ==="
 
+  migrate_from_repo              # move existing files out of ~/Documents
   purge_homebrew                 # 5
   ensure_config                  # 4
   ensure_usage_statistics_enabled  # 6 prerequisite: dashboard needs usage stats on
