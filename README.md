@@ -99,7 +99,7 @@ The proxy is used only for GitHub fetches; the managed applications do not inher
 
 ### macOS
 
-Runtime files are stored in `~/.local/share/cliproxyapi`. LaunchAgents are written to `~/Library/LaunchAgents`.
+Runtime files, including an installed copy of the manager used by daily updates, are stored in `~/.local/share/cliproxyapi`. LaunchAgents are written to `~/Library/LaunchAgents`; installation and start operations unload the existing job, delete its same-name plist, recreate it, and bootstrap the new definition. No LaunchAgent executes files from the cloned repository, so cloning under `~/Documents` does not trigger background-access prompts.
 
 ### Windows
 

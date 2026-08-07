@@ -4,15 +4,16 @@
 #
 # What this script does:
 #   1. Installs a LaunchAgent that checks the GitHub releases page every day at 10:00
-#      for a newer macOS aarch64 build, downloads it into this repo, and restarts the service.
-#   2. Downloads + replaces the local binary in this repo (downloads fresh if absent).
+#      for a newer macOS aarch64 build, downloads it into the user data directory,
+#      and restarts the service.
+#   2. Downloads + replaces the local binary in the user data directory.
 #   3. Restarts the local service (managed by a second "run" LaunchAgent with KeepAlive).
-#   4. Creates a config.yaml in this repo if missing (api-keys: local-key,
+#   4. Creates config.yaml in the user data directory if missing (api-keys: local-key,
 #      remote-management.secret-key: local-key).
 #   5. Stops and uninstalls any Homebrew-installed cliproxyapi (those lag behind upstream).
 #   6. Installs the cpa-usage-keeper dashboard (https://github.com/Willxup/cpa-usage-keeper)
 #      using the same release-download + LaunchAgent approach: it downloads the macOS
-#      aarch64 build into this repo, writes a .env pointing it at the local CLIProxyAPI
+#      aarch64 build into the user data directory, writes a .env pointing it at the local CLIProxyAPI
 #      (CPA_BASE_URL=http://127.0.0.1:8317, CPA_MANAGEMENT_KEY=local-key), serves the
 #      dashboard on port 30000, and keeps it updated daily + running via KeepAlive.
 #      It also flips usage-statistics-enabled: true in config.yaml, which the dashboard
@@ -51,6 +52,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Data directory outside ~/Documents so macOS TCC does not block LaunchAgent
 # processes from reading the working directory and config file.
 DATA_DIR="${HOME}/.local/share/cliproxyapi"
+MANAGER_PATH="${DATA_DIR}/start-cliproxyapi.sh"
 BIN_NAME="cli-proxy-api"
 BIN_PATH="${DATA_DIR}/${BIN_NAME}"
 CONFIG_PATH="${DATA_DIR}/config.yaml"
@@ -134,6 +136,16 @@ gh_curl() {
 # Migrate existing files from the repo dir into DATA_DIR (one-time, idempotent).
 # Called at the top of cmd_install so subsequent runs are no-ops.
 # ---------------------------------------------------------------------------
+install_manager_copy() {
+  mkdir -p "${DATA_DIR}"
+  local source="${REPO_DIR}/$(basename "${BASH_SOURCE[0]}")"
+  if [[ "${source}" != "${MANAGER_PATH}" ]]; then
+    cp -f "${source}" "${MANAGER_PATH}"
+  fi
+  chmod +x "${MANAGER_PATH}"
+  log "Installed manager script at ${MANAGER_PATH}"
+}
+
 migrate_from_repo() {
   local moved=false
 
@@ -582,7 +594,7 @@ write_update_plist() {
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>${REPO_DIR}/$(basename "${BASH_SOURCE[0]}")</string>
+        <string>${MANAGER_PATH}</string>
         <string>update</string>
     </array>
     <key>WorkingDirectory</key>
@@ -645,7 +657,7 @@ write_keeper_update_plist() {
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>${REPO_DIR}/$(basename "${BASH_SOURCE[0]}")</string>
+        <string>${MANAGER_PATH}</string>
         <string>keeper-update</string>
     </array>
     <key>WorkingDirectory</key>
@@ -690,12 +702,19 @@ unload_agent() {
   done
 }
 
+replace_agent() {
+  local label="$1" plist="$2" writer="$3"
+  unload_agent "${label}" "${plist}"
+  rm -f "${plist}"
+  "${writer}"
+  load_agent "${label}" "${plist}"
+}
+
 # ---------------------------------------------------------------------------
 # Service control
 # ---------------------------------------------------------------------------
 start_service() {
-  if [[ ! -f "${RUN_PLIST}" ]]; then write_run_plist; fi
-  load_agent "${RUN_LABEL}" "${RUN_PLIST}"
+  replace_agent "${RUN_LABEL}" "${RUN_PLIST}" write_run_plist
   log "Service started (LaunchAgent ${RUN_LABEL})."
 }
 
@@ -727,8 +746,7 @@ restart_service() {
 }
 
 start_keeper() {
-  if [[ ! -f "${KEEPER_RUN_PLIST}" ]]; then write_keeper_run_plist; fi
-  load_agent "${KEEPER_RUN_LABEL}" "${KEEPER_RUN_PLIST}"
+  replace_agent "${KEEPER_RUN_LABEL}" "${KEEPER_RUN_PLIST}" write_keeper_run_plist
   log "Dashboard started (LaunchAgent ${KEEPER_RUN_LABEL}) — http://127.0.0.1:${KEEPER_PORT}"
 }
 
@@ -819,6 +837,7 @@ cmd_install() {
   log "=== Installing CLIProxyAPI manager (repo: ${REPO_DIR}) ==="
 
   migrate_from_repo              # move existing files out of ~/Documents
+  install_manager_copy           # updater agents must never execute from ~/Documents
   purge_homebrew                 # 5
   ensure_config                  # 4
   ensure_usage_statistics_enabled  # 6 prerequisite: dashboard needs usage stats on
@@ -831,11 +850,8 @@ cmd_install() {
     fi
   fi
 
-  write_run_plist                # service definition
-  write_update_plist             # 1: daily 10:00 updater
-
-  load_agent "${UPDATE_LABEL}" "${UPDATE_PLIST}"
-  start_service                  # 3 (initial start)
+  replace_agent "${UPDATE_LABEL}" "${UPDATE_PLIST}" write_update_plist
+  start_service                  # replace run plist and start the service
 
   # 6: cpa-usage-keeper dashboard (same download/agent approach)
   install_keeper
@@ -855,9 +871,7 @@ install_keeper() {
       return 1
     fi
   fi
-  write_keeper_run_plist
-  write_keeper_update_plist
-  load_agent "${KEEPER_UPDATE_LABEL}" "${KEEPER_UPDATE_PLIST}"
+  replace_agent "${KEEPER_UPDATE_LABEL}" "${KEEPER_UPDATE_PLIST}" write_keeper_update_plist
   start_keeper
 }
 
@@ -890,7 +904,7 @@ cmd_keeper_update() {
 }
 
 cmd_uninstall() {
-  log "Removing LaunchAgents (repo files kept)."
+  log "Removing LaunchAgents (runtime data kept)."
   unload_agent "${RUN_LABEL}" "${RUN_PLIST}"
   unload_agent "${UPDATE_LABEL}" "${UPDATE_PLIST}"
   unload_agent "${KEEPER_RUN_LABEL}" "${KEEPER_RUN_PLIST}"
@@ -912,7 +926,7 @@ main() {
     restart)        restart_service ;;
     status)         status_service ;;
     uninstall)      cmd_uninstall ;;
-    keeper-install) require curl; require tar; install_keeper ;;
+    keeper-install) require curl; require tar; install_manager_copy; install_keeper ;;
     keeper-update)  cmd_keeper_update ;;
     keeper-start)   start_keeper ;;
     keeper-stop)    stop_keeper ;;
