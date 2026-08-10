@@ -12,7 +12,10 @@ Both applications start automatically after login, restart after a crash, and ch
 | System | Architectures | Background-process mechanism |
 | --- | --- | --- |
 | macOS | Apple Silicon | User LaunchAgents |
+| Ubuntu | x64, ARM64 | User systemd services and timers |
 | Windows 10/11 | x64, ARM64 | Current-user Scheduled Tasks |
+
+Ubuntu installation uses the current user's systemd manager and does not require administrator privileges. Run it from a normal login session without `sudo`.
 
 Windows tasks use the current user's limited token, so a standard Windows installation does not require administrator privileges. Windows PowerShell 5.1 or PowerShell 7 is supported; organization-managed devices may still restrict Scheduled Task creation through policy.
 
@@ -25,6 +28,18 @@ git clone ssh://git@github.com/chrisptang/install-cliproxyapi.git
 cd install-cliproxyapi
 ./start-cliproxyapi.sh install
 ```
+
+### Ubuntu
+
+Run as the target user without `sudo`:
+
+```bash
+git clone ssh://git@github.com/chrisptang/install-cliproxyapi.git
+cd install-cliproxyapi
+./start-cliproxyapi-ubuntu.sh install
+```
+
+The script requires Ubuntu with a running user systemd manager, plus `curl` and `tar`.
 
 ### Windows
 
@@ -53,9 +68,10 @@ Change the default keys before exposing either service outside your computer.
 
 ## Commands
 
-The macOS and Windows scripts expose the same commands. Substitute the command prefix for your system:
+The macOS, Ubuntu, and Windows scripts expose the same commands. Substitute the command prefix for your system:
 
 - macOS: `./start-cliproxyapi.sh`
+- Ubuntu: `./start-cliproxyapi-ubuntu.sh`
 - Windows: `.\start-cliproxyapi.ps1`
 
 | Command | What it does |
@@ -83,6 +99,12 @@ macOS example:
 http_proxy=http://127.0.0.1:1087 ./start-cliproxyapi.sh update
 ```
 
+Ubuntu example:
+
+```bash
+http_proxy=http://127.0.0.1:1087 ./start-cliproxyapi-ubuntu.sh update
+```
+
 Windows examples:
 
 ```powershell
@@ -101,6 +123,17 @@ The proxy is used only for GitHub fetches; the managed applications do not inher
 
 Runtime files, including an installed copy of the manager used by daily updates, are stored in `~/.local/share/cliproxyapi`. LaunchAgents are written to `~/Library/LaunchAgents`; installation and start operations unload the existing job, delete its same-name plist, recreate it, and bootstrap the new definition. No LaunchAgent executes files from the cloned repository, so cloning under `~/Documents` does not trigger background-access prompts.
 
+### Ubuntu
+
+Runtime files, including the installed manager copy used by daily updates, are stored in `~/.local/share/cliproxyapi`. User services and timers are written to `~/.config/systemd/user`:
+
+- `cliproxyapi.service`
+- `cliproxyapi-update.service` and `cliproxyapi-update.timer`
+- `cpa-usage-keeper.service`
+- `cpa-usage-keeper-update.service` and `cpa-usage-keeper-update.timer`
+
+Services start with the user's systemd session, restart after crashes, and write logs under `~/.local/share/cliproxyapi/logs`.
+
 ### Windows
 
 Runtime files are stored in `%LOCALAPPDATA%\CLIProxyAPI`. The manager creates four current-user Scheduled Tasks:
@@ -115,6 +148,7 @@ The data directory contains downloaded executables, `config.yaml`, the dashboard
 ## Notes
 
 - `config.yaml` and `keeper-data/.env` contain secrets. Back them up securely.
-- The dashboard requires `usage-statistics-enabled: true`; both installers enable it automatically.
+- The dashboard requires `usage-statistics-enabled: true`; all installers enable it automatically.
 - `uninstall` intentionally preserves local data. Delete the platform data directory manually if you want a complete removal.
-- On Windows, background tasks run only while the installing user is logged in. This keeps installation administrator-free and matches the macOS user-agent model.
+- On Ubuntu, background services use the current user's systemd session. The script does not enable lingering, so the user must log in before the services start.
+- On Windows, background tasks run only while the installing user is logged in. This keeps installation administrator-free and matches the macOS and Ubuntu user-service models.
