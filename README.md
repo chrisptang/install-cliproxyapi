@@ -59,7 +59,7 @@ If script execution is already allowed, this shorter form also works:
 
 After installation:
 
-- Proxy: `http://127.0.0.1:8317`
+- Proxy: `http://127.0.0.1:8317` by default; override it during installation with `--port` (`-Port` on Windows)
 - Dashboard: `http://127.0.0.1:30000`
 - Default client API key: `local-key`
 - Default management key: `local-key`
@@ -88,6 +88,21 @@ The macOS, Ubuntu, and Windows scripts expose the same commands. Substitute the 
 | `keeper-start` | Start cpa-usage-keeper. |
 | `keeper-stop` | Stop cpa-usage-keeper. |
 | `keeper-restart` | Restart cpa-usage-keeper. |
+
+### Override the proxy port
+
+The `install` command accepts a port override and keeps cpa-usage-keeper pointed at the same CLIProxyAPI endpoint:
+
+```bash
+./start-cliproxyapi.sh install --port 9000
+./start-cliproxyapi-ubuntu.sh install --port 9000
+```
+
+```powershell
+.\start-cliproxyapi.ps1 install -Port 9000
+```
+
+The port must be between `1` and `65535`. When the generated configuration already exists, an explicit port override updates its top-level `port` value and the keeper's `CPA_BASE_URL`; without an override, existing files remain untouched.
 
 ## GitHub proxy
 
