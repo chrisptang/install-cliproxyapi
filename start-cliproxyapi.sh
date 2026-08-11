@@ -20,7 +20,7 @@
 #      requires to receive any usage data.
 #
 # Usage:
-#   ./start-cliproxyapi.sh install     # full setup: purge brew, init config, install agents, download, start
+#   ./start-cliproxyapi.sh install [--port PORT]  # full setup; defaults to port 8317
 #   ./start-cliproxyapi.sh update      # daily job: download newer release if any, then restart
 #   ./start-cliproxyapi.sh start       # start the service
 #   ./start-cliproxyapi.sh stop        # stop the service
@@ -63,6 +63,8 @@ LOG_DIR="${DATA_DIR}/logs"
 GITHUB_REPO="router-for-me/CLIProxyAPI"
 LATEST_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 ASSET_SUFFIX="darwin_aarch64.tar.gz"   # macOS Apple Silicon asset
+PROXY_PORT=8317
+PORT_WAS_SPECIFIED=false
 
 # Proxy used only for GitHub fetches (api.github.com / github.com release downloads).
 # Honor an existing http_proxy/HTTP_PROXY from the environment, else fall back to 7890.
@@ -100,7 +102,7 @@ KEEPER_ASSET_SUFFIX="darwin_arm64.tar.gz"   # macOS Apple Silicon asset
 KEEPER_PORT=30000
 # What the dashboard uses to reach the local CLIProxyAPI. CPA_MANAGEMENT_KEY must be the
 # *plaintext* management key (config.yaml stores its bcrypt hash); we seeded "local-key".
-KEEPER_CPA_BASE_URL="http://127.0.0.1:8317"
+KEEPER_CPA_BASE_URL="http://127.0.0.1:${PROXY_PORT}"
 KEEPER_CPA_MANAGEMENT_KEY="local-key"
 
 KEEPER_RUN_LABEL="me.willxup.cpa-usage-keeper"
@@ -118,6 +120,60 @@ err()  { printf '\033[0;31m[cliproxyapi]\033[0m %s\n' "$*" >&2; }
 require() {
   if ! command -v "$1" >/dev/null 2>&1; then
     err "Required command not found: $1"
+    exit 1
+  fi
+}
+
+is_valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+set_proxy_port() {
+  PROXY_PORT="$((10#$1))"
+  KEEPER_CPA_BASE_URL="http://127.0.0.1:${PROXY_PORT}"
+}
+
+parse_arguments() {
+  COMMAND=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --port)
+        if (( $# < 2 )); then
+          err "--port requires a value between 1 and 65535."
+          exit 1
+        fi
+        is_valid_port "$2" || { err "Invalid port: $2 (expected 1-65535)."; exit 1; }
+        set_proxy_port "$2"
+        PORT_WAS_SPECIFIED=true
+        shift 2
+        ;;
+      --port=*)
+        local port_value="${1#*=}"
+        is_valid_port "${port_value}" || { err "Invalid port: ${port_value:-<empty>} (expected 1-65535)."; exit 1; }
+        set_proxy_port "${port_value}"
+        PORT_WAS_SPECIFIED=true
+        shift
+        ;;
+      -h|--help|help)
+        [[ -z "${COMMAND}" ]] || { err "Unexpected argument: $1"; exit 1; }
+        COMMAND="help"
+        shift
+        ;;
+      -*)
+        err "Unknown option: $1"
+        exit 1
+        ;;
+      *)
+        [[ -z "${COMMAND}" ]] || { err "Unexpected argument: $1"; exit 1; }
+        COMMAND="$1"
+        shift
+        ;;
+    esac
+  done
+
+  COMMAND="${COMMAND:-install}"
+  if ${PORT_WAS_SPECIFIED} && [[ "${COMMAND}" != "install" ]]; then
+    err "--port is only supported with the install command."
     exit 1
   fi
 }
@@ -362,9 +418,52 @@ download_keeper_binary() {
 # ---------------------------------------------------------------------------
 # 4. Ensure config.yaml exists
 # ---------------------------------------------------------------------------
+load_proxy_port_from_config() {
+  [[ -f "${CONFIG_PATH}" ]] || return 0
+
+  local line value
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%#*}"
+    if [[ "${line}" =~ ^port:[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+      value="${BASH_REMATCH[1]}"
+      if is_valid_port "${value}"; then
+        set_proxy_port "${value}"
+      fi
+      return 0
+    fi
+  done < "${CONFIG_PATH}"
+}
+
+update_config_port() {
+  local tmp_path="${CONFIG_PATH}.tmp.$$" line comment replaced=false
+  : > "${tmp_path}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if ! ${replaced} && [[ "${line}" =~ ^port:[[:space:]]* ]]; then
+      comment=""
+      if [[ "${line}" == *#* ]]; then
+        comment=" #${line#*#}"
+      fi
+      printf 'port: %s%s\n' "${PROXY_PORT}" "${comment}" >> "${tmp_path}"
+      replaced=true
+    else
+      printf '%s\n' "${line}" >> "${tmp_path}"
+    fi
+  done < "${CONFIG_PATH}"
+  if ! ${replaced}; then
+    printf '\nport: %s\n' "${PROXY_PORT}" >> "${tmp_path}"
+  fi
+  mv -f "${tmp_path}" "${CONFIG_PATH}"
+  log "Set CLIProxyAPI port to ${PROXY_PORT} in ${CONFIG_PATH}."
+}
+
 ensure_config() {
   if [[ -f "${CONFIG_PATH}" ]]; then
-    log "config.yaml already exists — leaving it untouched."
+    if ${PORT_WAS_SPECIFIED}; then
+      update_config_port
+    else
+      load_proxy_port_from_config
+      log "config.yaml already exists — leaving it untouched."
+    fi
     return 0
   fi
   log "config.yaml not found — creating a default one."
@@ -379,7 +478,7 @@ ensure_config() {
 
 # Bind to localhost only by default.
 host: "127.0.0.1"
-port: 8317
+port: ${PROXY_PORT}
 # Authentication directory for OAuth/credential files.
 auth-dir: "${AUTH_DIR}"
 # API keys clients must present to use the proxy.
@@ -517,11 +616,36 @@ ensure_usage_statistics_enabled() {
 # ---------------------------------------------------------------------------
 # 6. Ensure the cpa-usage-keeper .env exists (points it at the local CPA)
 # ---------------------------------------------------------------------------
+update_keeper_base_url() {
+  local tmp_path="${KEEPER_ENV_PATH}.tmp.$$" line replaced=false
+  : > "${tmp_path}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if ! ${replaced} && [[ "${line}" == CPA_BASE_URL=* ]]; then
+      printf 'CPA_BASE_URL=%s\n' "${KEEPER_CPA_BASE_URL}" >> "${tmp_path}"
+      replaced=true
+    else
+      printf '%s\n' "${line}" >> "${tmp_path}"
+    fi
+  done < "${KEEPER_ENV_PATH}"
+  if ! ${replaced}; then
+    printf '\nCPA_BASE_URL=%s\n' "${KEEPER_CPA_BASE_URL}" >> "${tmp_path}"
+  fi
+  mv -f "${tmp_path}" "${KEEPER_ENV_PATH}"
+  log "Set cpa-usage-keeper CPA_BASE_URL to ${KEEPER_CPA_BASE_URL}."
+}
+
 ensure_keeper_env() {
   mkdir -p "${KEEPER_DATA_DIR}"
   if [[ -f "${KEEPER_ENV_PATH}" ]]; then
-    log "cpa-usage-keeper .env already exists — leaving it untouched."
+    if ${PORT_WAS_SPECIFIED}; then
+      update_keeper_base_url
+    else
+      log "cpa-usage-keeper .env already exists — leaving it untouched."
+    fi
     return 0
+  fi
+  if ! ${PORT_WAS_SPECIFIED}; then
+    load_proxy_port_from_config
   fi
   log "cpa-usage-keeper .env not found — creating one."
   cat > "${KEEPER_ENV_PATH}" <<EOF
@@ -856,7 +980,7 @@ cmd_install() {
   # 6: cpa-usage-keeper dashboard (same download/agent approach)
   install_keeper
 
-  log "=== Done. CPA on port 8317; dashboard on http://127.0.0.1:${KEEPER_PORT}. ==="
+  log "=== Done. CPA on port ${PROXY_PORT}; dashboard on http://127.0.0.1:${KEEPER_PORT}. ==="
   status_service
 }
 
@@ -917,7 +1041,8 @@ cmd_uninstall() {
 # Dispatch
 # ---------------------------------------------------------------------------
 main() {
-  local cmd="${1:-install}"
+  parse_arguments "$@"
+  local cmd="${COMMAND}"
   case "${cmd}" in
     install)        cmd_install ;;
     update)         cmd_update ;;
