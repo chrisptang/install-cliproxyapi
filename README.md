@@ -59,10 +59,10 @@ If script execution is already allowed, this shorter form also works:
 
 After installation:
 
-- Proxy: `http://127.0.0.1:8317` by default; override it during installation with `--port` (`-Port` on Windows)
+- Proxy: `http://127.0.0.1:8317` by default; override the port during installation with `--port` (`-Port` on Windows), and bind it to the local network with `--lan` (`-Lan` on Windows)
 - Dashboard: `http://127.0.0.1:30000`
-- Default client API key: `local-key`
-- Default management key: `local-key`
+- Default client API key: `local-key` (localhost-only; `--lan` requires you to set your own)
+- Default management key: `local-key` (same)
 
 Change the default keys before exposing either service outside your computer.
 
@@ -103,6 +103,28 @@ The `install` command accepts a port override and keeps cpa-usage-keeper pointed
 ```
 
 The port must be between `1` and `65535`. When the generated configuration already exists, an explicit port override updates its top-level `port` value and the keeper's `CPA_BASE_URL`; without an override, existing files remain untouched.
+
+### Serve the local network (LAN mode)
+
+By default the proxy binds `127.0.0.1`, so only the machine running it can connect. Pass `--lan` (`-Lan` on Windows) to bind `0.0.0.0` instead, which lets other machines on the same network use the proxy:
+
+```bash
+./start-cliproxyapi.sh install --lan --api-key "$(openssl rand -hex 24)"
+./start-cliproxyapi-ubuntu.sh install --lan --api-key "$(openssl rand -hex 24)"
+```
+
+```powershell
+.\start-cliproxyapi.ps1 install -Lan -ApiKey ([guid]::NewGuid().ToString('N'))
+```
+
+LAN mode requires an explicit API key, which must be at least 16 characters of `A-Z a-z 0-9 . _ ~ -`. Binding `0.0.0.0` also exposes the management API, and the shipped `local-key` default is published in this repository, so reusing it would let anyone on the network read and modify the proxy configuration. The key you pass becomes both the client `api-keys` entry and `remote-management.secret-key`, and the keeper's `CPA_MANAGEMENT_KEY` is updated to match.
+
+Clients then point at `http://<this-machine-ip>:8317` and must send that API key. Note:
+
+- The cpa-usage-keeper dashboard stays bound to `127.0.0.1` in LAN mode. It runs without a login wall (`AUTH_ENABLED=false`), so it is deliberately not exposed.
+- A host firewall may still block inbound connections. Allow inbound TCP on the proxy port for the local network (`ufw allow`/`firewalld` on Ubuntu, Windows Defender Firewall on Windows).
+- Applied to an existing `config.yaml`, `--lan` rewrites `host` and, with `--api-key`, replaces the `api-keys` list and `remote-management.secret-key`. Re-running is safe, and installing later without `--lan` restores the `127.0.0.1` binding.
+- Only use this on networks you trust. The proxy forwards to upstream accounts billed to you.
 
 ## GitHub proxy
 
