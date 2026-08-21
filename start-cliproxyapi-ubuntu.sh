@@ -15,7 +15,13 @@
 # Supported architectures: x86_64/amd64 and aarch64/arm64.
 #
 # Usage:
-#   ./start-cliproxyapi-ubuntu.sh install [--port PORT]  # defaults to port 8317
+#   ./start-cliproxyapi-ubuntu.sh install [--port PORT] [--lan --api-key KEY]
+#                                      # defaults to 127.0.0.1:8317
+#   # --lan binds 0.0.0.0 so other machines on the local network can use the proxy.
+#   # It requires --api-key (>=16 chars of [A-Za-z0-9._~-]) because binding 0.0.0.0
+#   # also exposes the management API, and the shipped "local-key" default is public.
+#   # The cpa-usage-keeper dashboard stays bound to 127.0.0.1 either way.
+#   ./start-cliproxyapi-ubuntu.sh install --lan --api-key "$(openssl rand -hex 24)"
 #   ./start-cliproxyapi-ubuntu.sh update
 #   ./start-cliproxyapi-ubuntu.sh start
 #   ./start-cliproxyapi-ubuntu.sh stop
@@ -54,6 +60,13 @@ GITHUB_REPO="router-for-me/CLIProxyAPI"
 LATEST_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 PROXY_PORT=8317
 PORT_WAS_SPECIFIED=false
+# Listen address written into config.yaml. --lan flips it to 0.0.0.0 so other
+# machines on the local network can reach the proxy.
+PROXY_HOST="127.0.0.1"
+LAN_WAS_SPECIFIED=false
+# API key clients must present. Required (and must be non-default) with --lan.
+PROXY_API_KEY="local-key"
+API_KEY_WAS_SPECIFIED=false
 
 GITHUB_PROXY="${http_proxy:-${HTTP_PROXY:-http://127.0.0.1:7890}}"
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
@@ -115,7 +128,32 @@ is_valid_port() {
 
 set_proxy_port() {
   PROXY_PORT="$((10#$1))"
+  # The dashboard always reaches CPA over loopback, even when CPA binds 0.0.0.0.
   KEEPER_CPA_BASE_URL="http://127.0.0.1:${PROXY_PORT}"
+}
+
+# Best-effort LAN address of this machine, for the post-install hint only.
+lan_ip_hint() {
+  local ip
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") {print $(i+1); exit}}')"
+  printf '%s' "${ip:-<this-machine-ip>}"
+}
+
+# Keys land in a double-quoted YAML scalar and in the keeper's .env, so restrict
+# them to characters that are safe verbatim in both.
+set_proxy_api_key() {
+  local value="$1"
+  if [[ ! "${value}" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+    err "Invalid --api-key: use only letters, digits, and . _ ~ - characters."
+    return 1
+  fi
+  if (( ${#value} < 16 )); then
+    err "Invalid --api-key: use at least 16 characters."
+    return 1
+  fi
+  PROXY_API_KEY="${value}"
+  KEEPER_CPA_MANAGEMENT_KEY="${value}"
+  API_KEY_WAS_SPECIFIED=true
 }
 
 parse_arguments() {
@@ -139,6 +177,23 @@ parse_arguments() {
         PORT_WAS_SPECIFIED=true
         shift
         ;;
+      --lan)
+        PROXY_HOST="0.0.0.0"
+        LAN_WAS_SPECIFIED=true
+        shift
+        ;;
+      --api-key)
+        if (( $# < 2 )); then
+          err "--api-key requires a value."
+          exit 1
+        fi
+        set_proxy_api_key "$2" || exit 1
+        shift 2
+        ;;
+      --api-key=*)
+        set_proxy_api_key "${1#*=}" || exit 1
+        shift
+        ;;
       -h|--help|help)
         [[ -z "${COMMAND}" ]] || { err "Unexpected argument: $1"; exit 1; }
         COMMAND="help"
@@ -159,6 +214,22 @@ parse_arguments() {
   COMMAND="${COMMAND:-install}"
   if ${PORT_WAS_SPECIFIED} && [[ "${COMMAND}" != "install" ]]; then
     err "--port is only supported with the install command."
+    exit 1
+  fi
+  if ${LAN_WAS_SPECIFIED} && [[ "${COMMAND}" != "install" ]]; then
+    err "--lan is only supported with the install command."
+    exit 1
+  fi
+  if ${API_KEY_WAS_SPECIFIED} && [[ "${COMMAND}" != "install" ]]; then
+    err "--api-key is only supported with the install command."
+    exit 1
+  fi
+  # Binding 0.0.0.0 exposes the proxy AND its management API to the whole local
+  # network, so the shipped "local-key" default must not be reused there.
+  if ${LAN_WAS_SPECIFIED} && ! ${API_KEY_WAS_SPECIFIED}; then
+    err "--lan requires --api-key: binding 0.0.0.0 exposes the proxy and its"
+    err "management API to the local network, and the default key is public."
+    err "Example: ./start-cliproxyapi-ubuntu.sh install --lan --api-key \"\$(openssl rand -hex 24)\""
     exit 1
   fi
 }
@@ -466,6 +537,93 @@ update_config_port() {
   log "Set CLIProxyAPI port to ${PROXY_PORT} in ${CONFIG_PATH}."
 }
 
+# Reads the effective host:port out of config.yaml for `status` (which runs
+# without --lan/--port, so the globals still hold defaults).
+config_listen_summary() {
+  local host port
+  if [[ ! -f "${CONFIG_PATH}" ]]; then
+    printf 'unknown (no config.yaml)'
+    return 0
+  fi
+  host="$(sed -nE 's/^host:[[:space:]]*"?([^"#[:space:]]+)"?.*$/\1/p' "${CONFIG_PATH}" | head -n1)"
+  port="$(sed -nE 's/^port:[[:space:]]*([0-9]+).*$/\1/p' "${CONFIG_PATH}" | head -n1)"
+  host="${host:-127.0.0.1}"
+  port="${port:-${PROXY_PORT}}"
+  if [[ "${host}" == "0.0.0.0" ]]; then
+    printf '%s:%s (LAN — reachable at http://%s:%s)' "${host}" "${port}" "$(lan_ip_hint)" "${port}"
+  else
+    printf '%s:%s (this machine only)' "${host}" "${port}"
+  fi
+}
+update_config_host() {
+  local tmp_path="${CONFIG_PATH}.tmp.$$" line comment replaced=false
+  : > "${tmp_path}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    # Drop any previous bind note (stock or ours) so it can't contradict the new
+    # value, and so repeated runs don't stack up comment lines.
+    if ! ${replaced} && [[ "${line}" == "# Bind to localhost only by default." \
+                        || "${line}" == "# Bound to 0.0.0.0 by --lan: reachable from the local network." ]]; then
+      continue
+    fi
+    if ! ${replaced} && [[ "${line}" =~ ^host:[[:space:]]* ]]; then
+      comment=""
+      if [[ "${line}" == *#* ]]; then
+        comment=" #${line#*#}"
+      fi
+      if [[ "${PROXY_HOST}" == "0.0.0.0" ]]; then
+        printf '# Bound to 0.0.0.0 by --lan: reachable from the local network.\n' >> "${tmp_path}"
+      fi
+      printf 'host: "%s"%s\n' "${PROXY_HOST}" "${comment}" >> "${tmp_path}"
+      replaced=true
+    else
+      printf '%s\n' "${line}" >> "${tmp_path}"
+    fi
+  done < "${CONFIG_PATH}"
+  if ! ${replaced}; then
+    printf '\nhost: "%s"\n' "${PROXY_HOST}" >> "${tmp_path}"
+  fi
+  mv -f "${tmp_path}" "${CONFIG_PATH}"
+  log "Set CLIProxyAPI host to ${PROXY_HOST} in ${CONFIG_PATH}."
+}
+# Replaces the api-keys list (and the management secret-key) with the single key
+# given via --api-key. Any other keys previously listed are dropped.
+update_config_api_key() {
+  local tmp_path="${CONFIG_PATH}.tmp.$$" line
+  local in_api_keys=false keys_replaced=false secret_replaced=false
+  : > "${tmp_path}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if ${in_api_keys}; then
+      # Consume the existing list items; anything else ends the block.
+      if [[ "${line}" =~ ^[[:space:]]+-[[:space:]] ]]; then
+        continue
+      fi
+      in_api_keys=false
+    fi
+    if ! ${keys_replaced} && [[ "${line}" =~ ^api-keys:[[:space:]]*$ ]]; then
+      printf 'api-keys:\n  - %s\n' "${PROXY_API_KEY}" >> "${tmp_path}"
+      in_api_keys=true
+      keys_replaced=true
+      continue
+    fi
+    if ! ${secret_replaced} && [[ "${line}" =~ ^[[:space:]]+secret-key:[[:space:]] ]]; then
+      printf '  secret-key: "%s"\n' "${PROXY_API_KEY}" >> "${tmp_path}"
+      secret_replaced=true
+      continue
+    fi
+    printf '%s\n' "${line}" >> "${tmp_path}"
+  done < "${CONFIG_PATH}"
+  if ! ${keys_replaced}; then
+    printf '\napi-keys:\n  - %s\n' "${PROXY_API_KEY}" >> "${tmp_path}"
+  fi
+  mv -f "${tmp_path}" "${CONFIG_PATH}"
+  if ${secret_replaced}; then
+    log "Set api-keys and remote-management.secret-key to the provided key in ${CONFIG_PATH}."
+  else
+    warn "Set api-keys in ${CONFIG_PATH}, but found no remote-management.secret-key to update."
+    warn "Check that the management key is not still the default before exposing this host."
+  fi
+}
+
 ensure_config() {
   mkdir -p "${DATA_DIR}"
   if [[ -f "${CONFIG_PATH}" ]]; then
@@ -473,6 +631,14 @@ ensure_config() {
       update_config_port
     else
       load_proxy_port_from_config
+    fi
+    if ${API_KEY_WAS_SPECIFIED}; then
+      update_config_api_key
+    fi
+    if ${LAN_WAS_SPECIFIED}; then
+      update_config_host
+    fi
+    if ! ${PORT_WAS_SPECIFIED} && ! ${API_KEY_WAS_SPECIFIED} && ! ${LAN_WAS_SPECIFIED}; then
       log "config.yaml already exists — leaving it untouched."
     fi
     return 0
@@ -486,14 +652,16 @@ ensure_config() {
 # Optimization goal: make Codex feel fast WITHOUT changing request semantics or cost.
 # We deliberately do NOT force \`reasoning.effort\` and do NOT inject \`service_tier\`.
 
-host: "127.0.0.1"
+# Bind address. 127.0.0.1 = this machine only; 0.0.0.0 (--lan) = reachable from
+# the local network.
+host: "${PROXY_HOST}"
 port: ${PROXY_PORT}
 auth-dir: "${AUTH_DIR}"
 api-keys:
-  - local-key
+  - ${PROXY_API_KEY}
 remote-management:
   allow-remote: true
-  secret-key: "local-key"
+  secret-key: "${PROXY_API_KEY}"
 debug: true
 streaming:
   keepalive-seconds: 15
@@ -538,7 +706,7 @@ claude-api-key:
 logging-to-file: true
 proxy-url: http://127.0.0.1:7890
 EOF
-  log "Wrote ${CONFIG_PATH} (api-key: local-key, management secret-key: local-key)."
+  log "Wrote ${CONFIG_PATH} (host: ${PROXY_HOST}, api-key + management secret-key: ${PROXY_API_KEY})."
   log "NOTE: edit claude-api-key REPLACE_ME_* values before using the Anthropic endpoint."
 }
 
@@ -577,12 +745,36 @@ update_keeper_base_url() {
   log "Set cpa-usage-keeper CPA_BASE_URL to ${KEEPER_CPA_BASE_URL}."
 }
 
+update_keeper_management_key() {
+  local tmp_path="${KEEPER_ENV_PATH}.tmp.$$" line replaced=false
+  : > "${tmp_path}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if ! ${replaced} && [[ "${line}" == CPA_MANAGEMENT_KEY=* ]]; then
+      printf 'CPA_MANAGEMENT_KEY=%s\n' "${KEEPER_CPA_MANAGEMENT_KEY}" >> "${tmp_path}"
+      replaced=true
+    else
+      printf '%s\n' "${line}" >> "${tmp_path}"
+    fi
+  done < "${KEEPER_ENV_PATH}"
+  if ! ${replaced}; then
+    printf '\nCPA_MANAGEMENT_KEY=%s\n' "${KEEPER_CPA_MANAGEMENT_KEY}" >> "${tmp_path}"
+  fi
+  mv -f "${tmp_path}" "${KEEPER_ENV_PATH}"
+  log "Set cpa-usage-keeper CPA_MANAGEMENT_KEY to match config.yaml."
+}
+
 ensure_keeper_env() {
   mkdir -p "${KEEPER_DATA_DIR}"
   if [[ -f "${KEEPER_ENV_PATH}" ]]; then
     if ${PORT_WAS_SPECIFIED}; then
       update_keeper_base_url
-    else
+    fi
+    # The dashboard authenticates with the management key; keep it in sync with
+    # the secret-key just written into config.yaml, or it silently gets no data.
+    if ${API_KEY_WAS_SPECIFIED}; then
+      update_keeper_management_key
+    fi
+    if ! ${PORT_WAS_SPECIFIED} && ! ${API_KEY_WAS_SPECIFIED}; then
       log "cpa-usage-keeper .env already exists — leaving it untouched."
     fi
     return 0
@@ -819,6 +1011,7 @@ status_service() {
   log "Local version:  $(local_version)"
   log "Binary:         ${BIN_PATH} $( [[ -x "${BIN_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
   log "Config:         ${CONFIG_PATH} $( [[ -f "${CONFIG_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
+  log "Listen:         $(config_listen_summary)"
   log "Run service:    $(unit_state "${RUN_SERVICE}" "${RUN_UNIT_PATH}")"
   log "Update timer:   $(unit_state "${UPDATE_TIMER}" "${UPDATE_TIMER_PATH}") (daily 10:00)"
   log "--- cpa-usage-keeper (dashboard) ---"
@@ -900,7 +1093,14 @@ cmd_install() {
   start_service
   install_keeper
 
-  log "=== Done. CPA on port ${PROXY_PORT}; dashboard on http://127.0.0.1:${KEEPER_PORT}. ==="
+  if [[ "${PROXY_HOST}" == "0.0.0.0" ]]; then
+    log "=== Done. CPA on ${PROXY_HOST}:${PROXY_PORT} (LAN); dashboard on http://127.0.0.1:${KEEPER_PORT}. ==="
+    log "LAN clients: http://$(lan_ip_hint):${PROXY_PORT} — they must send the api-key you set."
+    log "The dashboard stays bound to this machine only."
+    log "If ufw/firewalld is active, allow inbound TCP ${PROXY_PORT} for LAN clients to connect."
+  else
+    log "=== Done. CPA on port ${PROXY_PORT}; dashboard on http://127.0.0.1:${KEEPER_PORT}. ==="
+  fi
   status_service
 }
 

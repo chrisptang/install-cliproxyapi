@@ -13,6 +13,9 @@ required.
 powershell -ExecutionPolicy Bypass -File .\start-cliproxyapi.ps1 install -Port 9000
 
 .EXAMPLE
+.\start-cliproxyapi.ps1 install -Lan -ApiKey ([guid]::NewGuid().ToString('N'))
+
+.EXAMPLE
 .\start-cliproxyapi.ps1 status
 #>
 
@@ -32,7 +35,16 @@ param(
     [string]$GitHubProxy,
 
     [ValidateRange(1, 65535)]
-    [int]$Port = 8317
+    [int]$Port = 8317,
+
+    # Bind 0.0.0.0 instead of 127.0.0.1 so other machines on the local network
+    # can reach the proxy. Requires -ApiKey, because binding 0.0.0.0 also exposes
+    # the management API and the shipped "local-key" default is public.
+    [switch]$Lan,
+
+    # API key clients must present. Also becomes the management secret-key.
+    [ValidatePattern('^[A-Za-z0-9._~-]{16,}$')]
+    [string]$ApiKey
 )
 
 Set-StrictMode -Version Latest
@@ -50,7 +62,23 @@ $script:PortWasSpecified = $PSBoundParameters.ContainsKey('Port')
 if ($script:PortWasSpecified -and $Command -ne 'install') {
     throw '-Port is only supported with the install command.'
 }
+$script:LanWasSpecified = $PSBoundParameters.ContainsKey('Lan')
+$script:ApiKeyWasSpecified = $PSBoundParameters.ContainsKey('ApiKey')
+if ($script:LanWasSpecified -and $Command -ne 'install') {
+    throw '-Lan is only supported with the install command.'
+}
+if ($script:ApiKeyWasSpecified -and $Command -ne 'install') {
+    throw '-ApiKey is only supported with the install command.'
+}
+# Binding 0.0.0.0 exposes the proxy AND its management API to the whole local
+# network, so the shipped "local-key" default must not be reused there.
+if ($script:LanWasSpecified -and -not $script:ApiKeyWasSpecified) {
+    throw ('-Lan requires -ApiKey: binding 0.0.0.0 exposes the proxy and its management ' +
+           'API to the local network, and the default key is public.')
+}
 $script:ProxyPort = $Port
+$script:ProxyHost = if ($Lan) { '0.0.0.0' } else { '127.0.0.1' }
+$script:ProxyApiKey = if ($script:ApiKeyWasSpecified) { $ApiKey } else { 'local-key' }
 
 $script:DataDir = Join-Path $env:LOCALAPPDATA 'CLIProxyAPI'
 $script:LogDir = Join-Path $script:DataDir 'logs'
@@ -333,6 +361,53 @@ function Set-ConfiguredProxyPort {
     Write-Log "Set CLIProxyAPI port to $($script:ProxyPort) in $($script:ConfigPath)."
 }
 
+function Set-ConfiguredProxyHost {
+    $content = Get-Content -LiteralPath $script:ConfigPath -Raw
+    # Drop any previous bind note (stock or ours) so it cannot contradict the new
+    # value, and so repeated runs do not stack up comment lines.
+    $content = [regex]::Replace(
+        $content,
+        '(?m)^(?:# Bind to localhost only by default\.|# Bound to 0\.0\.0\.0 by -Lan: reachable from the local network\.)\r?\n',
+        '')
+    $note = if ($script:ProxyHost -eq '0.0.0.0') {
+        "# Bound to 0.0.0.0 by -Lan: reachable from the local network.`r`n"
+    } else { '' }
+    $regex = [regex]'(?m)^(host:\s*)[^\s#]+(.*)$'
+    if ($regex.IsMatch($content)) {
+        $replacement = $note + 'host: "' + $script:ProxyHost + '"${2}'
+        $content = $regex.Replace($content, $replacement, 1)
+    }
+    else {
+        $content = $content.TrimEnd() + "`r`n`r`n" + $note + 'host: "' + $script:ProxyHost + '"' + "`r`n"
+    }
+    Write-Utf8NoBom -Path $script:ConfigPath -Content $content
+    Write-Log "Set CLIProxyAPI host to $($script:ProxyHost) in $($script:ConfigPath)."
+}
+
+# Replaces the api-keys list (and the management secret-key) with the single key
+# given via -ApiKey. Any other keys previously listed are dropped.
+function Set-ConfiguredApiKey {
+    $content = Get-Content -LiteralPath $script:ConfigPath -Raw
+    $keysRegex = [regex]'(?m)^api-keys:[^\S\r\n]*\r?\n(?:[^\S\r\n]+-[^\r\n]*\r?\n)*'
+    if ($keysRegex.IsMatch($content)) {
+        $content = $keysRegex.Replace($content, "api-keys:`r`n  - $($script:ProxyApiKey)`r`n", 1)
+    }
+    else {
+        $content = $content.TrimEnd() + "`r`n`r`napi-keys:`r`n  - $($script:ProxyApiKey)`r`n"
+    }
+    $secretRegex = [regex]'(?m)^([^\S\r\n]+secret-key:[^\S\r\n]*)[^\r\n]*$'
+    if ($secretRegex.IsMatch($content)) {
+        $content = $secretRegex.Replace($content, '${1}"' + $script:ProxyApiKey + '"', 1)
+        Write-Utf8NoBom -Path $script:ConfigPath -Content $content
+        Write-Log "Set api-keys and remote-management.secret-key to the provided key in $($script:ConfigPath)."
+    }
+    else {
+        Write-Utf8NoBom -Path $script:ConfigPath -Content $content
+        Write-Warn "Set api-keys in $($script:ConfigPath), but found no remote-management.secret-key to update."
+        Write-Warn 'Check that the management key is not still the default before exposing this host.'
+    }
+}
+
 function Ensure-Config {
     Initialize-Directories
     if (Test-Path -LiteralPath $script:ConfigPath) {
@@ -341,6 +416,14 @@ function Ensure-Config {
         }
         else {
             Sync-ProxyPortFromConfig
+        }
+        if ($script:ApiKeyWasSpecified) {
+            Set-ConfiguredApiKey
+        }
+        if ($script:LanWasSpecified) {
+            Set-ConfiguredProxyHost
+        }
+        if (-not $script:PortWasSpecified -and -not $script:ApiKeyWasSpecified -and -not $script:LanWasSpecified) {
             Write-Log 'config.yaml already exists; leaving it untouched.'
         }
         return
@@ -349,14 +432,16 @@ function Ensure-Config {
     $authDir = (Join-Path $HOME '.cli-proxy-api').Replace('\', '/')
     $content = @"
 # CLIProxyAPI config generated by start-cliproxyapi.ps1
-host: "127.0.0.1"
+# Bind address. 127.0.0.1 = this machine only; 0.0.0.0 (-Lan) = reachable from
+# the local network.
+host: "$($script:ProxyHost)"
 port: $($script:ProxyPort)
 auth-dir: "$authDir"
 api-keys:
-  - local-key
+  - $($script:ProxyApiKey)
 remote-management:
   allow-remote: true
-  secret-key: "local-key"
+  secret-key: "$($script:ProxyApiKey)"
 debug: false
 streaming:
   keepalive-seconds: 15
@@ -385,7 +470,7 @@ redis-usage-queue-retention-seconds: 60
 logging-to-file: true
 "@
     Write-Utf8NoBom -Path $script:ConfigPath -Content $content
-    Write-Log "Created $($script:ConfigPath) (API key and management key: local-key)."
+    Write-Log "Created $($script:ConfigPath) (host: $($script:ProxyHost), API key and management key: $($script:ProxyApiKey))."
 }
 
 function Ensure-UsageStatisticsEnabled {
@@ -422,13 +507,31 @@ function Set-KeeperBaseUrl {
     Write-Log "Set cpa-usage-keeper CPA_BASE_URL to $baseUrl."
 }
 
+function Set-KeeperManagementKey {
+    $content = Get-Content -LiteralPath $script:KeeperEnvPath -Raw
+    $regex = [regex]'(?m)^CPA_MANAGEMENT_KEY=.*$'
+    if ($regex.IsMatch($content)) {
+        $content = $regex.Replace($content, "CPA_MANAGEMENT_KEY=$($script:ProxyApiKey)", 1)
+    }
+    else {
+        $content = $content.TrimEnd() + "`r`n`r`nCPA_MANAGEMENT_KEY=$($script:ProxyApiKey)`r`n"
+    }
+    Write-Utf8NoBom -Path $script:KeeperEnvPath -Content $content
+    Write-Log 'Set cpa-usage-keeper CPA_MANAGEMENT_KEY to match config.yaml.'
+}
+
 function Ensure-KeeperEnvironment {
     Initialize-Directories
     if (Test-Path -LiteralPath $script:KeeperEnvPath) {
         if ($script:PortWasSpecified) {
             Set-KeeperBaseUrl
         }
-        else {
+        # The dashboard authenticates with the management key; keep it in sync with
+        # the secret-key just written into config.yaml, or it silently gets no data.
+        if ($script:ApiKeyWasSpecified) {
+            Set-KeeperManagementKey
+        }
+        if (-not $script:PortWasSpecified -and -not $script:ApiKeyWasSpecified) {
             Write-Log 'cpa-usage-keeper .env already exists; leaving it untouched.'
         }
         return
@@ -440,7 +543,7 @@ function Ensure-KeeperEnvironment {
     $content = @"
 # cpa-usage-keeper config generated by start-cliproxyapi.ps1
 CPA_BASE_URL=http://127.0.0.1:$($script:ProxyPort)
-CPA_MANAGEMENT_KEY=local-key
+CPA_MANAGEMENT_KEY=$($script:ProxyApiKey)
 APP_PORT=$($script:KeeperPort)
 WORK_DIR=.
 AUTH_ENABLED=false
@@ -574,6 +677,36 @@ function Show-TaskStatus {
     return [string]$task.State
 }
 
+# Best-effort LAN address of this machine, for the post-install hint only.
+function Get-LanIpHint {
+    try {
+        $ip = Get-NetIPConfiguration |
+            Where-Object { $_.IPv4DefaultGateway -and $_.IPv4Address } |
+            Select-Object -First 1 -ExpandProperty IPv4Address |
+            Select-Object -First 1 -ExpandProperty IPAddress
+        if ($ip) { return $ip }
+    }
+    catch { }
+    return '<this-machine-ip>'
+}
+
+# Reads the effective host:port out of config.yaml for status (which runs without
+# -Lan/-Port, so the script variables still hold defaults).
+function Get-ConfiguredListenSummary {
+    if (-not (Test-Path -LiteralPath $script:ConfigPath)) { return 'unknown (no config.yaml)' }
+    $content = Get-Content -LiteralPath $script:ConfigPath -Raw
+    $bindHost = '127.0.0.1'
+    $bindPort = [string]$script:ProxyPort
+    $m = [regex]::Match($content, '(?m)^host:\s*"?([^"\s#]+)"?')
+    if ($m.Success) { $bindHost = $m.Groups[1].Value }
+    $m = [regex]::Match($content, '(?m)^port:\s*(\d+)')
+    if ($m.Success) { $bindPort = $m.Groups[1].Value }
+    if ($bindHost -eq '0.0.0.0') {
+        return "${bindHost}:${bindPort} (LAN - reachable at http://$(Get-LanIpHint):${bindPort})"
+    }
+    return "${bindHost}:${bindPort} (this machine only)"
+}
+
 function Show-Status {
     $architecture = Get-WindowsArchitecture
     Write-Host "Architecture:       $($architecture.Display)"
@@ -583,6 +716,7 @@ function Show-Status {
     Write-Host "Proxy task:         $(Show-TaskStatus -TaskName $script:ProxyTask)"
     Write-Host "Proxy update task:  $(Show-TaskStatus -TaskName $script:ProxyUpdateTask)"
     Write-Host "Config:             $(if (Test-Path -LiteralPath $script:ConfigPath) { $script:ConfigPath } else { 'MISSING' })"
+    Write-Host "Listen:             $(Get-ConfiguredListenSummary)"
     Write-Host "Keeper version:     $(Get-LocalVersion -Path $script:KeeperVersionFile)"
     Write-Host "Keeper binary:      $(if (Test-Path -LiteralPath $script:KeeperBinPath) { 'present' } else { 'MISSING' })"
     Write-Host "Keeper task:        $(Show-TaskStatus -TaskName $script:KeeperTask)"
@@ -603,7 +737,15 @@ function Install-All {
     Register-ManagerTasks
     Start-Proxy
     Start-Keeper
-    Write-Log '=== Installation complete. ==='
+    if ($script:ProxyHost -eq '0.0.0.0') {
+        Write-Log "=== Installation complete. CPA on $($script:ProxyHost):$($script:ProxyPort) (LAN). ==="
+        Write-Log "LAN clients: http://$(Get-LanIpHint):$($script:ProxyPort) - they must send the api-key you set."
+        Write-Log 'The dashboard stays bound to this machine only.'
+        Write-Log "If Windows Firewall blocks it, allow inbound TCP $($script:ProxyPort) for the private network."
+    }
+    else {
+        Write-Log '=== Installation complete. ==='
+    }
     Show-Status
 }
 
@@ -688,6 +830,10 @@ Usage:
 Commands:
   install          Install/update both apps, register tasks, and start them (default)
                    -Port overrides the default CLIProxyAPI port 8317
+                   -Lan binds 0.0.0.0 so the local network can reach the proxy;
+                   it requires -ApiKey (>=16 chars of A-Z a-z 0-9 . _ ~ -), since
+                   binding 0.0.0.0 also exposes the management API. The
+                   cpa-usage-keeper dashboard stays bound to 127.0.0.1.
   update           Update CLIProxyAPI and restart it only when needed
   start|stop       Start or stop CLIProxyAPI
   restart|status   Restart CLIProxyAPI or show status for both apps
@@ -701,6 +847,9 @@ Commands:
 Proxy examples:
   .\start-cliproxyapi.ps1 install -GitHubProxy http://127.0.0.1:1080
   .\start-cliproxyapi.ps1 install -GitHubProxy ""   # direct connection
+
+LAN example:
+  .\start-cliproxyapi.ps1 install -Lan -ApiKey ([guid]::NewGuid().ToString('N'))
 '@ | Write-Host
 }
 
