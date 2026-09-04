@@ -6,7 +6,8 @@ Installs and manages CLIProxyAPI and cpa-usage-keeper on Windows.
 .DESCRIPTION
 The manager installs both applications into the current user's LocalAppData
 directory. It creates current-user Scheduled Tasks for login startup, crash
-restart, and a daily update check at 10:00. Administrator privileges are not
+restart, and a daily update check at a user-selected time (default 09:00).
+Administrator privileges are not
 required.
 
 .EXAMPLE
@@ -100,6 +101,7 @@ $script:KeeperUpdateTask = 'CLIProxyAPI Usage Keeper Update'
 $script:ProxyRepo = 'router-for-me/CLIProxyAPI'
 $script:KeeperRepo = 'Willxup/cpa-usage-keeper'
 $script:KeeperPort = 30000
+$script:UpdateTime = '09:00'
 
 function Write-Log {
     param([string]$Message)
@@ -109,6 +111,18 @@ function Write-Log {
 function Write-Warn {
     param([string]$Message)
     Write-Warning "[cliproxyapi] $Message"
+}
+
+function Read-UpdateTime {
+    while ($true) {
+        $value = Read-Host 'Daily update time [09:00] (HH:mm)'
+        if ([string]::IsNullOrWhiteSpace($value)) { $value = '09:00' }
+        if ($value -match '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$') {
+            $script:UpdateTime = $value
+            return
+        }
+        Write-Warn "Invalid time: $value (expected HH:mm, for example 09:00 or 23:30)."
+    }
 }
 
 function Write-Utf8NoBom {
@@ -609,7 +623,7 @@ function Register-ManagerTasks {
         -Force | Out-Null
 
     $powerShellPath = (Get-Process -Id $PID).Path
-    $dailyTrigger = New-ScheduledTaskTrigger -Daily -At '10:00'
+    $dailyTrigger = New-ScheduledTaskTrigger -Daily -At $script:UpdateTime
     if (-not $KeeperOnly) {
         $proxyUpdateArguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Command update' -f $script:InstalledManagerPath
         $proxyUpdateAction = New-ScheduledTaskAction -Execute $powerShellPath -Argument $proxyUpdateArguments -WorkingDirectory $script:DataDir
@@ -619,7 +633,7 @@ function Register-ManagerTasks {
             -Trigger $dailyTrigger `
             -Principal $principal `
             -Settings (New-UpdateTaskSettings) `
-            -Description 'Check CLIProxyAPI for updates every day at 10:00.' `
+            -Description "Check CLIProxyAPI for updates every day at $($script:UpdateTime)." `
             -Force | Out-Null
     }
 
@@ -631,7 +645,7 @@ function Register-ManagerTasks {
         -Trigger $dailyTrigger `
         -Principal $principal `
         -Settings (New-UpdateTaskSettings) `
-        -Description 'Check cpa-usage-keeper for updates every day at 10:00.' `
+        -Description "Check cpa-usage-keeper for updates every day at $($script:UpdateTime)." `
         -Force | Out-Null
 
     Write-Log 'Registered login/startup and daily-update Scheduled Tasks.'
@@ -725,6 +739,7 @@ function Show-Status {
 }
 
 function Install-All {
+    Read-UpdateTime
     Write-Log '=== Installing CLIProxyAPI manager for Windows ==='
     Initialize-Directories
     Install-ManagerCopy
@@ -750,6 +765,7 @@ function Install-All {
 }
 
 function Install-Keeper {
+    Read-UpdateTime
     Initialize-Directories
     Install-ManagerCopy
     Save-ManagerSettings

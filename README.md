@@ -5,7 +5,7 @@ Cross-platform installer and manager for:
 - **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — the local proxy/router for Codex, Claude, and Gemini.
 - **[cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper)** — a token-usage dashboard backed by CLIProxyAPI.
 
-Both applications start automatically after login, restart after a crash, and check GitHub for updates every day at 10:00.
+Both applications start automatically after login, restart after a crash, and check GitHub for updates daily. During installation, the scripts ask for the update time in `HH:mm` format; pressing Enter uses `09:00`.
 
 ## Supported systems
 
@@ -76,7 +76,7 @@ The macOS, Ubuntu, and Windows scripts expose the same commands. Substitute the 
 
 | Command | What it does |
 | --- | --- |
-| `install` | Install/update both applications, register background jobs, and start them. This is the default. |
+| `install` | Ask for the daily update time, install/update both applications, register background jobs, and start them. This is the default. |
 | `update` | Check for a CLIProxyAPI update and restart it if updated. |
 | `start` | Start CLIProxyAPI. |
 | `stop` | Stop CLIProxyAPI. |

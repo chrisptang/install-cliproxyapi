@@ -5,7 +5,8 @@
 # What this script does:
 #   1. Installs user-level systemd services that start CLIProxyAPI and
 #      cpa-usage-keeper after login and restart them after a crash.
-#   2. Installs user-level systemd timers that check GitHub every day at 10:00,
+#   2. Installs user-level systemd timers that check GitHub every day at a
+#      user-selected time (defaults to 09:00),
 #      download newer Linux builds, and restart the corresponding service.
 #   3. Creates config.yaml and the cpa-usage-keeper .env file when missing.
 #   4. Stores binaries, configuration, logs, versions, and an installed copy of
@@ -79,8 +80,9 @@ RUN_UNIT_PATH="${SYSTEMD_USER_DIR}/${RUN_SERVICE}"
 UPDATE_UNIT_PATH="${SYSTEMD_USER_DIR}/${UPDATE_SERVICE}"
 UPDATE_TIMER_PATH="${SYSTEMD_USER_DIR}/${UPDATE_TIMER}"
 
-UPDATE_HOUR=10
+UPDATE_HOUR=9
 UPDATE_MINUTE=0
+UPDATE_TIME_PROMPTED=false
 
 # ---------------------------------------------------------------------------
 # cpa-usage-keeper
@@ -111,9 +113,9 @@ DISPLAY_ARCH=""
 # ---------------------------------------------------------------------------
 # Logging & validation
 # ---------------------------------------------------------------------------
-log()  { printf '\033[0;32m[cliproxyapi]\033[0m %s\n' "$*"; }
+log() { printf '\033[0;32m[cliproxyapi]\033[0m %s\n' "$*"; }
 warn() { printf '\033[0;33m[cliproxyapi]\033[0m %s\n' "$*" >&2; }
-err()  { printf '\033[0;31m[cliproxyapi]\033[0m %s\n' "$*" >&2; }
+err() { printf '\033[0;31m[cliproxyapi]\033[0m %s\n' "$*" >&2; }
 
 require() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -123,7 +125,29 @@ require() {
 }
 
 is_valid_port() {
-  [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+  [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535))
+}
+
+prompt_update_time() {
+  ${UPDATE_TIME_PROMPTED} && return 0
+
+  local value
+  while true; do
+    printf 'Daily update time [09:00] (HH:MM): '
+    IFS= read -r value || value=""
+    value="${value:-09:00}"
+    if [[ "${value}" =~ ^([01][0-9]|2[0-3]):([0-5][0-9])$ ]]; then
+      UPDATE_HOUR="$((10#${BASH_REMATCH[1]}))"
+      UPDATE_MINUTE="$((10#${BASH_REMATCH[2]}))"
+      UPDATE_TIME_PROMPTED=true
+      return 0
+    fi
+    warn "Invalid time: ${value} (expected HH:MM, for example 09:00 or 23:30)."
+  done
+}
+
+update_time_display() {
+  printf '%02d:%02d' "${UPDATE_HOUR}" "${UPDATE_MINUTE}"
 }
 
 set_proxy_port() {
@@ -147,7 +171,7 @@ set_proxy_api_key() {
     err "Invalid --api-key: use only letters, digits, and . _ ~ - characters."
     return 1
   fi
-  if (( ${#value} < 16 )); then
+  if ((${#value} < 16)); then
     err "Invalid --api-key: use at least 16 characters."
     return 1
   fi
@@ -158,56 +182,68 @@ set_proxy_api_key() {
 
 parse_arguments() {
   COMMAND=""
-  while (( $# > 0 )); do
+  while (($# > 0)); do
     case "$1" in
-      --port)
-        if (( $# < 2 )); then
-          err "--port requires a value between 1 and 65535."
-          exit 1
-        fi
-        is_valid_port "$2" || { err "Invalid port: $2 (expected 1-65535)."; exit 1; }
-        set_proxy_port "$2"
-        PORT_WAS_SPECIFIED=true
-        shift 2
-        ;;
-      --port=*)
-        local port_value="${1#*=}"
-        is_valid_port "${port_value}" || { err "Invalid port: ${port_value:-<empty>} (expected 1-65535)."; exit 1; }
-        set_proxy_port "${port_value}"
-        PORT_WAS_SPECIFIED=true
-        shift
-        ;;
-      --lan)
-        PROXY_HOST="0.0.0.0"
-        LAN_WAS_SPECIFIED=true
-        shift
-        ;;
-      --api-key)
-        if (( $# < 2 )); then
-          err "--api-key requires a value."
-          exit 1
-        fi
-        set_proxy_api_key "$2" || exit 1
-        shift 2
-        ;;
-      --api-key=*)
-        set_proxy_api_key "${1#*=}" || exit 1
-        shift
-        ;;
-      -h|--help|help)
-        [[ -z "${COMMAND}" ]] || { err "Unexpected argument: $1"; exit 1; }
-        COMMAND="help"
-        shift
-        ;;
-      -*)
-        err "Unknown option: $1"
+    --port)
+      if (($# < 2)); then
+        err "--port requires a value between 1 and 65535."
         exit 1
-        ;;
-      *)
-        [[ -z "${COMMAND}" ]] || { err "Unexpected argument: $1"; exit 1; }
-        COMMAND="$1"
-        shift
-        ;;
+      fi
+      is_valid_port "$2" || {
+        err "Invalid port: $2 (expected 1-65535)."
+        exit 1
+      }
+      set_proxy_port "$2"
+      PORT_WAS_SPECIFIED=true
+      shift 2
+      ;;
+    --port=*)
+      local port_value="${1#*=}"
+      is_valid_port "${port_value}" || {
+        err "Invalid port: ${port_value:-<empty>} (expected 1-65535)."
+        exit 1
+      }
+      set_proxy_port "${port_value}"
+      PORT_WAS_SPECIFIED=true
+      shift
+      ;;
+    --lan)
+      PROXY_HOST="0.0.0.0"
+      LAN_WAS_SPECIFIED=true
+      shift
+      ;;
+    --api-key)
+      if (($# < 2)); then
+        err "--api-key requires a value."
+        exit 1
+      fi
+      set_proxy_api_key "$2" || exit 1
+      shift 2
+      ;;
+    --api-key=*)
+      set_proxy_api_key "${1#*=}" || exit 1
+      shift
+      ;;
+    -h | --help | help)
+      [[ -z "${COMMAND}" ]] || {
+        err "Unexpected argument: $1"
+        exit 1
+      }
+      COMMAND="help"
+      shift
+      ;;
+    -*)
+      err "Unknown option: $1"
+      exit 1
+      ;;
+    *)
+      [[ -z "${COMMAND}" ]] || {
+        err "Unexpected argument: $1"
+        exit 1
+      }
+      COMMAND="$1"
+      shift
+      ;;
     esac
   done
 
@@ -255,20 +291,20 @@ require_ubuntu() {
 
 detect_architecture() {
   case "$(uname -m)" in
-    x86_64|amd64)
-      PROXY_ARCH="amd64"
-      KEEPER_ARCH="amd64"
-      DISPLAY_ARCH="x64"
-      ;;
-    aarch64|arm64)
-      PROXY_ARCH="aarch64"
-      KEEPER_ARCH="arm64"
-      DISPLAY_ARCH="ARM64"
-      ;;
-    *)
-      err "Unsupported Ubuntu architecture: $(uname -m). Only x86_64 and ARM64 are supported."
-      exit 1
-      ;;
+  x86_64 | amd64)
+    PROXY_ARCH="amd64"
+    KEEPER_ARCH="amd64"
+    DISPLAY_ARCH="x64"
+    ;;
+  aarch64 | arm64)
+    PROXY_ARCH="aarch64"
+    KEEPER_ARCH="arm64"
+    DISPLAY_ARCH="ARM64"
+    ;;
+  *)
+    err "Unsupported Ubuntu architecture: $(uname -m). Only x86_64 and ARM64 are supported."
+    exit 1
+    ;;
   esac
 }
 
@@ -386,18 +422,21 @@ purge_homebrew() {
 fetch_latest_release() {
   local json tag url asset_suffix
   asset_suffix="linux_${PROXY_ARCH}.tar.gz"
-  json="$(gh_curl -fsSL "${LATEST_API}")" || { err "Failed to query GitHub releases API."; return 1; }
+  json="$(gh_curl -fsSL "${LATEST_API}")" || {
+    err "Failed to query GitHub releases API."
+    return 1
+  }
 
-  tag="$(printf '%s' "${json}" \
-        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-        | sed -E 's/.*"([^"]+)"$/\1/' \
-        | head -n1)"
-  url="$(printf '%s' "${json}" \
-        | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
-        | sed -E 's/.*"([^"]+)"$/\1/' \
-        | grep "${asset_suffix}$" \
-        | grep -v 'no-plugin' \
-        | head -n1)"
+  tag="$(printf '%s' "${json}" |
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' |
+    sed -E 's/.*"([^"]+)"$/\1/' |
+    head -n1)"
+  url="$(printf '%s' "${json}" |
+    grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' |
+    sed -E 's/.*"([^"]+)"$/\1/' |
+    grep "${asset_suffix}$" |
+    grep -v 'no-plugin' |
+    head -n1)"
 
   if [[ -z "${tag}" || -z "${url}" ]]; then
     err "Could not determine latest version or Ubuntu ${DISPLAY_ARCH} asset URL."
@@ -409,17 +448,20 @@ fetch_latest_release() {
 fetch_latest_keeper_release() {
   local json tag url asset_suffix
   asset_suffix="linux_${KEEPER_ARCH}.tar.gz"
-  json="$(gh_curl -fsSL "${KEEPER_LATEST_API}")" || { err "Failed to query cpa-usage-keeper releases API."; return 1; }
+  json="$(gh_curl -fsSL "${KEEPER_LATEST_API}")" || {
+    err "Failed to query cpa-usage-keeper releases API."
+    return 1
+  }
 
-  tag="$(printf '%s' "${json}" \
-        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-        | sed -E 's/.*"([^"]+)"$/\1/' \
-        | head -n1)"
-  url="$(printf '%s' "${json}" \
-        | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
-        | sed -E 's/.*"([^"]+)"$/\1/' \
-        | grep "${asset_suffix}$" \
-        | head -n1)"
+  tag="$(printf '%s' "${json}" |
+    grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' |
+    sed -E 's/.*"([^"]+)"$/\1/' |
+    head -n1)"
+  url="$(printf '%s' "${json}" |
+    grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' |
+    sed -E 's/.*"([^"]+)"$/\1/' |
+    grep "${asset_suffix}$" |
+    head -n1)"
 
   if [[ -z "${tag}" || -z "${url}" ]]; then
     err "Could not determine latest cpa-usage-keeper version or Ubuntu ${DISPLAY_ARCH} asset URL."
@@ -461,7 +503,7 @@ download_binary() {
 
   chmod +x "${extracted}"
   mv -f "${extracted}" "${BIN_PATH}"
-  printf '%s\n' "${tag}" > "${VERSION_FILE}"
+  printf '%s\n' "${tag}" >"${VERSION_FILE}"
   rm -rf "${tmpdir}"
   log "Installed ${BIN_NAME} ${tag} at ${BIN_PATH}"
 }
@@ -491,7 +533,7 @@ download_keeper_binary() {
 
   chmod +x "${extracted}"
   mv -f "${extracted}" "${KEEPER_BIN_PATH}"
-  printf '%s\n' "${tag}" > "${KEEPER_VERSION_FILE}"
+  printf '%s\n' "${tag}" >"${KEEPER_VERSION_FILE}"
   rm -rf "${tmpdir}"
   log "Installed ${KEEPER_BIN_NAME} ${tag} at ${KEEPER_BIN_PATH}"
 }
@@ -512,26 +554,26 @@ load_proxy_port_from_config() {
       fi
       return 0
     fi
-  done < "${CONFIG_PATH}"
+  done <"${CONFIG_PATH}"
 }
 
 update_config_port() {
   local tmp_path="${CONFIG_PATH}.tmp.$$" line comment replaced=false
-  : > "${tmp_path}"
+  : >"${tmp_path}"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if ! ${replaced} && [[ "${line}" =~ ^port:[[:space:]]* ]]; then
       comment=""
       if [[ "${line}" == *#* ]]; then
         comment=" #${line#*#}"
       fi
-      printf 'port: %s%s\n' "${PROXY_PORT}" "${comment}" >> "${tmp_path}"
+      printf 'port: %s%s\n' "${PROXY_PORT}" "${comment}" >>"${tmp_path}"
       replaced=true
     else
-      printf '%s\n' "${line}" >> "${tmp_path}"
+      printf '%s\n' "${line}" >>"${tmp_path}"
     fi
-  done < "${CONFIG_PATH}"
+  done <"${CONFIG_PATH}"
   if ! ${replaced}; then
-    printf '\nport: %s\n' "${PROXY_PORT}" >> "${tmp_path}"
+    printf '\nport: %s\n' "${PROXY_PORT}" >>"${tmp_path}"
   fi
   mv -f "${tmp_path}" "${CONFIG_PATH}"
   log "Set CLIProxyAPI port to ${PROXY_PORT} in ${CONFIG_PATH}."
@@ -557,12 +599,12 @@ config_listen_summary() {
 }
 update_config_host() {
   local tmp_path="${CONFIG_PATH}.tmp.$$" line comment replaced=false
-  : > "${tmp_path}"
+  : >"${tmp_path}"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     # Drop any previous bind note (stock or ours) so it can't contradict the new
     # value, and so repeated runs don't stack up comment lines.
-    if ! ${replaced} && [[ "${line}" == "# Bind to localhost only by default." \
-                        || "${line}" == "# Bound to 0.0.0.0 by --lan: reachable from the local network." ]]; then
+    if ! ${replaced} && [[ "${line}" == "# Bind to localhost only by default." ||
+      "${line}" == "# Bound to 0.0.0.0 by --lan: reachable from the local network." ]]; then
       continue
     fi
     if ! ${replaced} && [[ "${line}" =~ ^host:[[:space:]]* ]]; then
@@ -571,16 +613,16 @@ update_config_host() {
         comment=" #${line#*#}"
       fi
       if [[ "${PROXY_HOST}" == "0.0.0.0" ]]; then
-        printf '# Bound to 0.0.0.0 by --lan: reachable from the local network.\n' >> "${tmp_path}"
+        printf '# Bound to 0.0.0.0 by --lan: reachable from the local network.\n' >>"${tmp_path}"
       fi
-      printf 'host: "%s"%s\n' "${PROXY_HOST}" "${comment}" >> "${tmp_path}"
+      printf 'host: "%s"%s\n' "${PROXY_HOST}" "${comment}" >>"${tmp_path}"
       replaced=true
     else
-      printf '%s\n' "${line}" >> "${tmp_path}"
+      printf '%s\n' "${line}" >>"${tmp_path}"
     fi
-  done < "${CONFIG_PATH}"
+  done <"${CONFIG_PATH}"
   if ! ${replaced}; then
-    printf '\nhost: "%s"\n' "${PROXY_HOST}" >> "${tmp_path}"
+    printf '\nhost: "%s"\n' "${PROXY_HOST}" >>"${tmp_path}"
   fi
   mv -f "${tmp_path}" "${CONFIG_PATH}"
   log "Set CLIProxyAPI host to ${PROXY_HOST} in ${CONFIG_PATH}."
@@ -590,7 +632,7 @@ update_config_host() {
 update_config_api_key() {
   local tmp_path="${CONFIG_PATH}.tmp.$$" line
   local in_api_keys=false keys_replaced=false secret_replaced=false
-  : > "${tmp_path}"
+  : >"${tmp_path}"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if ${in_api_keys}; then
       # Consume the existing list items; anything else ends the block.
@@ -600,20 +642,20 @@ update_config_api_key() {
       in_api_keys=false
     fi
     if ! ${keys_replaced} && [[ "${line}" =~ ^api-keys:[[:space:]]*$ ]]; then
-      printf 'api-keys:\n  - %s\n' "${PROXY_API_KEY}" >> "${tmp_path}"
+      printf 'api-keys:\n  - %s\n' "${PROXY_API_KEY}" >>"${tmp_path}"
       in_api_keys=true
       keys_replaced=true
       continue
     fi
     if ! ${secret_replaced} && [[ "${line}" =~ ^[[:space:]]+secret-key:[[:space:]] ]]; then
-      printf '  secret-key: "%s"\n' "${PROXY_API_KEY}" >> "${tmp_path}"
+      printf '  secret-key: "%s"\n' "${PROXY_API_KEY}" >>"${tmp_path}"
       secret_replaced=true
       continue
     fi
-    printf '%s\n' "${line}" >> "${tmp_path}"
-  done < "${CONFIG_PATH}"
+    printf '%s\n' "${line}" >>"${tmp_path}"
+  done <"${CONFIG_PATH}"
   if ! ${keys_replaced}; then
-    printf '\napi-keys:\n  - %s\n' "${PROXY_API_KEY}" >> "${tmp_path}"
+    printf '\napi-keys:\n  - %s\n' "${PROXY_API_KEY}" >>"${tmp_path}"
   fi
   mv -f "${tmp_path}" "${CONFIG_PATH}"
   if ${secret_replaced}; then
@@ -645,7 +687,7 @@ ensure_config() {
   fi
 
   log "config.yaml not found — creating a default one."
-  cat > "${CONFIG_PATH}" <<EOF
+  cat >"${CONFIG_PATH}" <<EOF
 # CLIProxyAPI config — tuned for low-latency Codex (GPT-5.x) forwarding.
 # Generated/updated by start-cliproxyapi-ubuntu.sh. Full reference: https://help.router-for.me/
 #
@@ -722,24 +764,24 @@ ensure_usage_statistics_enabled() {
     sed -E -i 's/^([[:space:]]*usage-statistics-enabled:[[:space:]]*)[^[:space:]#]+(.*)$/\1true\2/' "${CONFIG_PATH}"
     log "Set usage-statistics-enabled: true in config.yaml (required by cpa-usage-keeper)."
   else
-    printf '\n# Enabled so cpa-usage-keeper can persist token usage.\nusage-statistics-enabled: true\n' >> "${CONFIG_PATH}"
+    printf '\n# Enabled so cpa-usage-keeper can persist token usage.\nusage-statistics-enabled: true\n' >>"${CONFIG_PATH}"
     log "Appended usage-statistics-enabled: true to config.yaml (required by cpa-usage-keeper)."
   fi
 }
 
 update_keeper_base_url() {
   local tmp_path="${KEEPER_ENV_PATH}.tmp.$$" line replaced=false
-  : > "${tmp_path}"
+  : >"${tmp_path}"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if ! ${replaced} && [[ "${line}" == CPA_BASE_URL=* ]]; then
-      printf 'CPA_BASE_URL=%s\n' "${KEEPER_CPA_BASE_URL}" >> "${tmp_path}"
+      printf 'CPA_BASE_URL=%s\n' "${KEEPER_CPA_BASE_URL}" >>"${tmp_path}"
       replaced=true
     else
-      printf '%s\n' "${line}" >> "${tmp_path}"
+      printf '%s\n' "${line}" >>"${tmp_path}"
     fi
-  done < "${KEEPER_ENV_PATH}"
+  done <"${KEEPER_ENV_PATH}"
   if ! ${replaced}; then
-    printf '\nCPA_BASE_URL=%s\n' "${KEEPER_CPA_BASE_URL}" >> "${tmp_path}"
+    printf '\nCPA_BASE_URL=%s\n' "${KEEPER_CPA_BASE_URL}" >>"${tmp_path}"
   fi
   mv -f "${tmp_path}" "${KEEPER_ENV_PATH}"
   log "Set cpa-usage-keeper CPA_BASE_URL to ${KEEPER_CPA_BASE_URL}."
@@ -747,17 +789,17 @@ update_keeper_base_url() {
 
 update_keeper_management_key() {
   local tmp_path="${KEEPER_ENV_PATH}.tmp.$$" line replaced=false
-  : > "${tmp_path}"
+  : >"${tmp_path}"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if ! ${replaced} && [[ "${line}" == CPA_MANAGEMENT_KEY=* ]]; then
-      printf 'CPA_MANAGEMENT_KEY=%s\n' "${KEEPER_CPA_MANAGEMENT_KEY}" >> "${tmp_path}"
+      printf 'CPA_MANAGEMENT_KEY=%s\n' "${KEEPER_CPA_MANAGEMENT_KEY}" >>"${tmp_path}"
       replaced=true
     else
-      printf '%s\n' "${line}" >> "${tmp_path}"
+      printf '%s\n' "${line}" >>"${tmp_path}"
     fi
-  done < "${KEEPER_ENV_PATH}"
+  done <"${KEEPER_ENV_PATH}"
   if ! ${replaced}; then
-    printf '\nCPA_MANAGEMENT_KEY=%s\n' "${KEEPER_CPA_MANAGEMENT_KEY}" >> "${tmp_path}"
+    printf '\nCPA_MANAGEMENT_KEY=%s\n' "${KEEPER_CPA_MANAGEMENT_KEY}" >>"${tmp_path}"
   fi
   mv -f "${tmp_path}" "${KEEPER_ENV_PATH}"
   log "Set cpa-usage-keeper CPA_MANAGEMENT_KEY to match config.yaml."
@@ -784,7 +826,7 @@ ensure_keeper_env() {
     load_proxy_port_from_config
   fi
   log "cpa-usage-keeper .env not found — creating one."
-  cat > "${KEEPER_ENV_PATH}" <<EOF
+  cat >"${KEEPER_ENV_PATH}" <<EOF
 # cpa-usage-keeper config generated by start-cliproxyapi-ubuntu.sh
 CPA_BASE_URL=${KEEPER_CPA_BASE_URL}
 CPA_MANAGEMENT_KEY=${KEEPER_CPA_MANAGEMENT_KEY}
@@ -801,7 +843,7 @@ EOF
 # ---------------------------------------------------------------------------
 write_run_service() {
   mkdir -p "${SYSTEMD_USER_DIR}" "${LOG_DIR}"
-  cat > "${RUN_UNIT_PATH}" <<EOF
+  cat >"${RUN_UNIT_PATH}" <<EOF
 [Unit]
 Description=CLIProxyAPI local proxy
 
@@ -830,7 +872,7 @@ EOF
 
 write_update_units() {
   mkdir -p "${SYSTEMD_USER_DIR}" "${LOG_DIR}"
-  cat > "${UPDATE_UNIT_PATH}" <<EOF
+  cat >"${UPDATE_UNIT_PATH}" <<EOF
 [Unit]
 Description=Check CLIProxyAPI for updates
 
@@ -842,7 +884,7 @@ StandardOutput=append:${LOG_DIR}/cliproxyapi.update.log
 StandardError=append:${LOG_DIR}/cliproxyapi.update.log
 EOF
 
-  cat > "${UPDATE_TIMER_PATH}" <<EOF
+  cat >"${UPDATE_TIMER_PATH}" <<EOF
 [Unit]
 Description=Daily CLIProxyAPI update check
 
@@ -854,12 +896,12 @@ Unit=${UPDATE_SERVICE}
 [Install]
 WantedBy=timers.target
 EOF
-  log "Wrote daily update timer (10:00): ${UPDATE_TIMER_PATH}"
+  log "Wrote daily update timer ($(update_time_display)): ${UPDATE_TIMER_PATH}"
 }
 
 write_keeper_run_service() {
   mkdir -p "${SYSTEMD_USER_DIR}" "${LOG_DIR}" "${KEEPER_DATA_DIR}"
-  cat > "${KEEPER_RUN_UNIT_PATH}" <<EOF
+  cat >"${KEEPER_RUN_UNIT_PATH}" <<EOF
 [Unit]
 Description=cpa-usage-keeper dashboard
 
@@ -888,7 +930,7 @@ EOF
 
 write_keeper_update_units() {
   mkdir -p "${SYSTEMD_USER_DIR}" "${LOG_DIR}"
-  cat > "${KEEPER_UPDATE_UNIT_PATH}" <<EOF
+  cat >"${KEEPER_UPDATE_UNIT_PATH}" <<EOF
 [Unit]
 Description=Check cpa-usage-keeper for updates
 
@@ -900,7 +942,7 @@ StandardOutput=append:${LOG_DIR}/cpa-usage-keeper.update.log
 StandardError=append:${LOG_DIR}/cpa-usage-keeper.update.log
 EOF
 
-  cat > "${KEEPER_UPDATE_TIMER_PATH}" <<EOF
+  cat >"${KEEPER_UPDATE_TIMER_PATH}" <<EOF
 [Unit]
 Description=Daily cpa-usage-keeper update check
 
@@ -912,7 +954,7 @@ Unit=${KEEPER_UPDATE_SERVICE}
 [Install]
 WantedBy=timers.target
 EOF
-  log "Wrote cpa-usage-keeper daily update timer (10:00): ${KEEPER_UPDATE_TIMER_PATH}"
+  log "Wrote cpa-usage-keeper daily update timer ($(update_time_display)): ${KEEPER_UPDATE_TIMER_PATH}"
 }
 
 reload_user_systemd() {
@@ -963,8 +1005,8 @@ stop_keeper() {
 }
 
 keeper_is_running() {
-  systemctl --user is-active --quiet "${KEEPER_RUN_SERVICE}" \
-    || pgrep -f -x "${KEEPER_BIN_PATH}" >/dev/null 2>&1
+  systemctl --user is-active --quiet "${KEEPER_RUN_SERVICE}" ||
+    pgrep -f -x "${KEEPER_BIN_PATH}" >/dev/null 2>&1
 }
 
 restart_service() {
@@ -1009,18 +1051,18 @@ status_service() {
   log "Architecture:   ${DISPLAY_ARCH}"
   log "Data directory: ${DATA_DIR}"
   log "Local version:  $(local_version)"
-  log "Binary:         ${BIN_PATH} $( [[ -x "${BIN_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
-  log "Config:         ${CONFIG_PATH} $( [[ -f "${CONFIG_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
+  log "Binary:         ${BIN_PATH} $([[ -x "${BIN_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
+  log "Config:         ${CONFIG_PATH} $([[ -f "${CONFIG_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
   log "Listen:         $(config_listen_summary)"
   log "Run service:    $(unit_state "${RUN_SERVICE}" "${RUN_UNIT_PATH}")"
-  log "Update timer:   $(unit_state "${UPDATE_TIMER}" "${UPDATE_TIMER_PATH}") (daily 10:00)"
+  log "Update timer:   $(unit_state "${UPDATE_TIMER}" "${UPDATE_TIMER_PATH}")"
   log "--- cpa-usage-keeper (dashboard) ---"
   log "Keeper version: $(keeper_local_version)"
-  log "Keeper binary:  ${KEEPER_BIN_PATH} $( [[ -x "${KEEPER_BIN_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
-  log "Keeper env:     ${KEEPER_ENV_PATH} $( [[ -f "${KEEPER_ENV_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
+  log "Keeper binary:  ${KEEPER_BIN_PATH} $([[ -x "${KEEPER_BIN_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
+  log "Keeper env:     ${KEEPER_ENV_PATH} $([[ -f "${KEEPER_ENV_PATH}" ]] && echo '(present)' || echo '(MISSING)')"
   log "Dashboard URL:  http://127.0.0.1:${KEEPER_PORT}"
   log "Keeper service: $(unit_state "${KEEPER_RUN_SERVICE}" "${KEEPER_RUN_UNIT_PATH}")"
-  log "Keeper timer:   $(unit_state "${KEEPER_UPDATE_TIMER}" "${KEEPER_UPDATE_TIMER_PATH}") (daily 10:00)"
+  log "Keeper timer:   $(unit_state "${KEEPER_UPDATE_TIMER}" "${KEEPER_UPDATE_TIMER_PATH}")"
 }
 
 # ---------------------------------------------------------------------------
@@ -1059,6 +1101,7 @@ do_keeper_update_check() {
 }
 
 install_keeper() {
+  prompt_update_time
   log "--- Installing cpa-usage-keeper dashboard ---"
   ensure_keeper_env
   if do_keeper_update_check; then :; else
@@ -1072,6 +1115,7 @@ install_keeper() {
 }
 
 cmd_install() {
+  prompt_update_time
   require curl
   require tar
   log "=== Installing CLIProxyAPI manager for Ubuntu ${DISPLAY_ARCH} (repo: ${REPO_DIR}) ==="
@@ -1112,9 +1156,15 @@ cmd_update() {
   local rc=0
   do_update_check || rc=$?
   case "${rc}" in
-    0) log "New version installed — restarting service."; restart_service ;;
-    1) log "No update; leaving running service as-is." ;;
-    *) err "Update check failed (network/API error). Will retry next run."; exit 1 ;;
+  0)
+    log "New version installed — restarting service."
+    restart_service
+    ;;
+  1) log "No update; leaving running service as-is." ;;
+  *)
+    err "Update check failed (network/API error). Will retry next run."
+    exit 1
+    ;;
   esac
 }
 
@@ -1126,9 +1176,15 @@ cmd_keeper_update() {
   local rc=0
   do_keeper_update_check || rc=$?
   case "${rc}" in
-    0) log "New dashboard version installed — restarting dashboard."; restart_keeper ;;
-    1) log "No dashboard update; leaving it running as-is." ;;
-    *) err "Dashboard update check failed (network/API error). Will retry next run."; exit 1 ;;
+  0)
+    log "New dashboard version installed — restarting dashboard."
+    restart_keeper
+    ;;
+  1) log "No dashboard update; leaving it running as-is." ;;
+  *)
+    err "Dashboard update check failed (network/API error). Will retry next run."
+    exit 1
+    ;;
   esac
 }
 
@@ -1162,10 +1218,10 @@ main() {
   parse_arguments "$@"
   local cmd="${COMMAND}"
   case "${cmd}" in
-    -h|--help|help)
-      show_help
-      return 0
-      ;;
+  -h | --help | help)
+    show_help
+    return 0
+    ;;
   esac
 
   require_ubuntu
@@ -1173,23 +1229,28 @@ main() {
   require_user_systemd
 
   case "${cmd}" in
-    install)        cmd_install ;;
-    update)         cmd_update ;;
-    start)          start_service ;;
-    stop)           stop_service ;;
-    restart)        restart_service ;;
-    status)         status_service ;;
-    uninstall)      cmd_uninstall ;;
-    keeper-install) require curl; require tar; install_manager_copy; install_keeper ;;
-    keeper-update)  cmd_keeper_update ;;
-    keeper-start)   start_keeper ;;
-    keeper-stop)    stop_keeper ;;
-    keeper-restart) restart_keeper ;;
-    *)
-      err "Unknown command: ${cmd}"
-      err "Run '$(basename "${BASH_SOURCE[0]}") --help' for usage."
-      exit 1
-      ;;
+  install) cmd_install ;;
+  update) cmd_update ;;
+  start) start_service ;;
+  stop) stop_service ;;
+  restart) restart_service ;;
+  status) status_service ;;
+  uninstall) cmd_uninstall ;;
+  keeper-install)
+    require curl
+    require tar
+    install_manager_copy
+    install_keeper
+    ;;
+  keeper-update) cmd_keeper_update ;;
+  keeper-start) start_keeper ;;
+  keeper-stop) stop_keeper ;;
+  keeper-restart) restart_keeper ;;
+  *)
+    err "Unknown command: ${cmd}"
+    err "Run '$(basename "${BASH_SOURCE[0]}") --help' for usage."
+    exit 1
+    ;;
   esac
 }
 
